@@ -86,6 +86,20 @@ jobs:
             echo "MOON_KEY_PASS=$MOON_KEY_PASS"
           } >> "$GITHUB_ENV"
 
+      - name: Compilador OFS inicial (ofscc do repositório)
+        working-directory: OFS/Obsidian-Fault-Script
+        run: |
+          # O runner não tem o OFS instalado: usa o ofscc pré-compilado do repo
+          # como semente; o build.sh compila o ofscc atual a partir do fonte.
+          SEED="$PWD/ofs/dist/ofscc"
+          chmod +x "$SEED"
+          if ! "$SEED" --version >/dev/null 2>&1 && ! OFSCC_MODE=check OFSCC_INPUT=/dev/null "$SEED" >/dev/null 2>&1; then
+            echo "ofscc pré-compilado não roda; gerando a partir de ofs/dist/ofscc.ll"
+            clang -O1 -Wno-override-module ofs/dist/ofscc.ll ofs/dist/magma.ll -lm -o "$RUNNER_TEMP/ofscc"
+            SEED="$RUNNER_TEMP/ofscc"
+          fi
+          echo "OFSCC=$SEED" >> "$GITHUB_ENV"
+
       - name: Build release
         working-directory: OFS/Moon/moon
         run: |
