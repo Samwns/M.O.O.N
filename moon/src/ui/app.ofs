@@ -1,0 +1,2057 @@
+// M.O.O.N — logica das telas do app.oal (acoes, fontes de dados, ciclo de vida).
+// A ordem das telas no app.oal define os indices S_* abaixo.
+
+attach {F:files.ofs}
+attach {F:player.ofs}
+attach {F:webgame.ofs}
+attach {F:../host/host.ofs}
+
+namespace app {
+    forge S_BIB: stone = 0
+    forge S_IMP: stone = 1
+    forge S_DET: stone = 2
+    forge S_REN: stone = 3
+    forge S_CAPA: stone = 4
+    forge S_PLUG: stone = 5
+    forge S_PLDET: stone = 6
+    forge S_CFG: stone = 7
+    forge S_ARQ: stone = 8
+    forge S_PLAYER: stone = 9
+    forge S_PAUSA: stone = 10
+    forge S_SLOTS: stone = 11
+    forge S_BACKLOG: stone = 12
+    forge S_BUSCA: stone = 13
+    forge S_SAVES: stone = 14
+    forge S_SAVEIMP: stone = 15
+    forge S_PKG: stone = 16
+    forge S_URL: stone = 17
+    forge S_CORES: stone = 18
+    forge S_COR: stone = 19
+    forge S_DESC: stone = 20
+
+    forge files: obsidian = ""
+    forge ready: bool = false
+    forge has_perm: bool = false
+    forge det: stone = -1              // jogo dos detalhes (indice da biblioteca)
+    forge edit_text: obsidian = ""
+    forge rm_armed: stone = 0          // hora do 1o toque em "remover"
+    forge pl_sel: stone = 0
+    // menus suspensos / bottom sheets (0 fechado)
+    forge POP_MENU: stone = 1          // menu de 3 pontos da tela
+    forge POP_JOGO: stone = 2          // segurar o card do jogo
+    forge POP_DEL: stone = 3           // confirmar apagar da biblioteca
+    forge POP_DELF1: stone = 4         // 1a confirmacao: apagar jogo e dados do app
+    forge POP_DELF2: stone = 8         // 2a confirmacao
+    forge POP_SV: stone = 5            // segurar linha de saves
+    forge POP_SVDEL: stone = 7
+    forge POP_PLG: stone = 6           // segurar linha de plugins
+    forge POP_PLGDEL: stone = 9
+    forge POP_MODO: stone = 10         // escolha do modo de controle ao jogar
+    forge POP_PJ: stone = 11           // menu ⋮ do player
+    forge md_lembrar: stone = 1        // caixa "lembrar para este jogo"
+    forge md_pend: stone = 0           // acao pendente: 1 jogar, 2 continuar, 3 jogar_host
+    forge pop: stone = 0
+    forge pop_i: stone = -1
+
+    // gerenciador de plugins
+    forge pr_kind: Array<stone> = []     // 0 motor, 1 pacote
+    forge pr_ref: Array<obsidian> = []   // chave do motor ou id do pacote
+    forge pr_nome: Array<obsidian> = []
+    forge pr_sub: Array<obsidian> = []
+    forge pr_icon: Array<obsidian> = []
+    forge pr_badge: Array<obsidian> = []
+    forge pk_sel: obsidian = ""          // id do pacote da tela de detalhe
+    forge pk_rm_armed: stone = 0
+    forge alvo_game: stone = -1          // jogo que pediu o plugin (-1 nenhum)
+    forge fetch_pending: bool = false
+    forge url_text: obsidian = ""
+    forge pending_choice: obsidian = ""  // jogo cujo "mais proximo" esta sendo baixado
+    forge pending_choice_id: obsidian = ""
+
+    // patches do jogo dos detalhes
+    forge p_id: Array<obsidian> = []
+    forge p_nome: Array<obsidian> = []
+    forge p_sub: Array<obsidian> = []
+    forge p_sel: stone = -1              // patch tocado por ultimo (alvo de "remover")
+    forge pt_rm_armed: stone = 0
+    forge sh_path: Array<obsidian> = []   // screenshots do jogo dos detalhes (ate 6)
+    forge sh_nome: Array<obsidian> = []
+    forge desc_text: obsidian = ""       // descricao em edicao
+
+    // slots
+    forge s_slot: Array<obsidian> = []
+    forge s_nome: Array<obsidian> = []
+    forge s_sub: Array<obsidian> = []
+    forge s_img: Array<obsidian> = []
+
+    // ── inicio ───────────────────────────────────────────────────────────
+    vein iniciar() -> void {
+        if (host.no_inicio()) { return }    // processo em modo motor (src/host/host.ofs)
+        // glifo que falta na Roboto (japones, setas) vem da Noto CJK do sistema
+        ttf.set_fallback_file("/system/fonts/NotoSansCJK-Regular.ttc", "CJK JP")
+        files = android.external_data_path()
+        if (tx.len(files) == 0) { files = android.internal_data_path() }
+        bx.mkdir_p(files + "/games")
+        bx.mkdir_p(files + "/saves")
+        bx.mkdir_p(files + "/patches")
+        bx.mkdir_p(files + "/import")
+        cfg.load(files + "/config.json")
+        apply_settings()
+        // tabela Shift-JIS do conversor (assets do APK -> files/)
+        forge sj = files + "/sjis932.bin"
+        if (!bx.exists(sj)) {
+            forge b = android.asset_read("sjis932.bin")
+            if (b != null) { bx.write_file(sj, b as stone, android.asset_len) }
+        }
+        imp.sjis_path = sj
+        imp.sjis_ok = tm.load_sjis(sj)
+        imp.roots = []
+        ofs_array_push(imp.roots, "/storage/emulated/0/Download")
+        ofs_array_push(imp.roots, files + "/import")
+        arq.roots = []
+        arq.root_names = []
+        ofs_array_push(arq.roots, "/storage/emulated/0")
+        ofs_array_push(arq.roots, "/storage/emulated/0/Download")
+        ofs_array_push(arq.roots, files)
+        patch.init(files + "/patches", files + "/settings.json")
+        lib.load(files + "/library.json", files)
+        has_perm = android.is_external_storage_manager()
+        if (has_perm) { lib.auto_art_all() }      // capa/icone de Ren'Py e Godot ja importados
+        setup_saves()
+        plg.init(files)
+        _plg_url_file()
+        plg.refresh_status()
+        // desenhar tambem na faixa do recorte da camera (sem faixa preta em paisagem)
+        android.set_cutout_short_edges(true)
+        ready = true
+        oal.log("moon: files=" + files + " perm=" + perm_text())
+    }
+
+    // Saves do MOON. em /sdcard/MOON/saves/moon/<jogo>/ (com permissao) ou, sem ela, em files/saves.
+    // Ao ter a permissao, migra files/saves/<jogo>/ copiando e conferindo antes de apagar.
+    vein setup_saves() -> void {
+        if (has_perm) {
+            sv.ensure_library()
+            sv.legacy_renpy()
+            if (bx.is_dir(sv.saves_dir)) {
+                bx.mkdir_p(sv.saves_dir + "/moon")
+                forge moved = sv.migrate_moon(files + "/saves")
+                if (moved > 0) { oal.toast(tr("sv_migrados")) }
+                save.set_root(sv.saves_dir + "/moon")
+                return
+            }
+        }
+        save.set_root(files + "/saves")
+    }
+
+    // /sdcard/MOON/plugin_index.txt (uma linha) define a URL do repositorio de plugins (uso de desenvolvimento)
+    vein _plg_url_file() -> void {
+        forge u = tx.strip(bx.read_text("/storage/emulated/0/MOON/plugin_index.txt"))
+        if (tx.len(u) > 0 && !tx.eq(u, cfg.plugin_index)) {
+            cfg.plugin_index = u
+            cfg.save()
+        }
+    }
+
+    vein ret_true() -> bool { return true }
+    vein ret_false() -> bool { return false }
+
+    vein apply_settings() -> void {
+        cfg.apply_theme()
+        oal.text_scale = cfg.text_size
+        oal.overlay_opacity = cfg.ctrl_opacity
+        oal.overlay_scale = cfg.ctrl_size
+        apply_orientation()
+        oal.refresh()
+    }
+
+    vein apply_orientation() -> void {
+        if (cfg.orientation == 1) { oal.set_orientation(oal.ORIENT_PORTRAIT) }
+        else if (cfg.orientation == 2) { oal.set_orientation(oal.ORIENT_LANDSCAPE) }
+        else { oal.set_orientation(oal.ORIENT_AUTO) }
+    }
+
+    vein perm() -> bool { return has_perm }
+
+    vein perm_text() -> obsidian {
+        if (has_perm) { return tr("perm_ok") }
+        return tr("perm_nao")
+    }
+
+    vein pedir_permissao() -> void {
+        if (!android.open_all_files_settings()) { oal.toast(tr("perm_falhou")) }
+    }
+
+    vein noop() -> void { }
+
+    // ── ciclo de vida ────────────────────────────────────────────────────
+    vein voltar() -> void {
+        if (pop != 0) {
+            fechar_popup()
+            return
+        }
+        if (oal.screen == S_PLAYER) {
+            pausa()
+            return
+        }
+        if (oal.screen == S_PAUSA) {
+            voltar_jogo()
+            return
+        }
+        if (oal.screen == S_SAVES && sv.up()) {
+            oal.refresh()
+            return
+        }
+        if (oal.screen == S_IMP && imp.busy) {
+            oal.toast(tr("imp_aviso"))
+            return
+        }
+        if (aba_atual() >= 0 && oal.stack_depth() == 0) {
+            // aba principal: volta para a Biblioteca; na Biblioteca sai do app
+            if (oal.screen == S_BIB) { oal.quit() } else { oal.reset_to(S_BIB) }
+            return
+        }
+        oal.back()
+    }
+
+    vein pausou() -> void {
+        if (web.active) { webview.pause(true) }
+        if (player.active) {
+            if (player.can_save()) { player.save_to(save.QUICK) }
+            audio.pause()
+        }
+    }
+
+    vein retomou() -> void {
+        forge had = has_perm
+        has_perm = android.is_external_storage_manager()
+        if (has_perm && !had) { setup_saves() }
+        if (web.active) { webview.pause(false) }
+        android.set_cutout_short_edges(true)
+        if (player.active) { player.enter_orientation() } else { apply_orientation() }
+        if (player.active) {
+            audio.resume()
+            oal.set_animating(true)
+        }
+        oal.refresh()
+    }
+
+    vein girou() -> void { oal.refresh() }
+
+    vein quadro() -> void {
+        if (imp.busy) {
+            forge fim = imp.step()
+            oal.refresh()
+            if (fim && imp.result >= 0) {
+                plg.refresh_status()
+                sv.ensure_library()
+                imp.scan()
+                abrir_detalhes_lib(imp.result)
+            }
+        }
+        arq.step()
+        player.tick()
+        web.tick()
+        _plg_frame()
+    }
+
+    // consulta pendente do indice e passo do download (um por quadro)
+    vein _plg_frame() -> void {
+        if (fetch_pending) {
+            fetch_pending = false
+            plg.fetch_index(cfg.plugin_index)
+            _plg_after_index()
+            oal.refresh()
+            return
+        }
+        if (plg.busy) {
+            forge fim = plg.step()
+            if (fim) { _plg_after_install() }
+            oal.refresh()
+        }
+    }
+
+
+    // ── biblioteca / importar ────────────────────────────────────────────
+    vein abrir_importar() -> void {
+        if (!has_perm) {
+            oal.toast(tr("perm_nao"))
+            return
+        }
+        imp.scan()
+        oal.go(S_IMP)
+    }
+
+    vein reescanear() -> void {
+        imp.scan()
+        oal.refresh()
+    }
+
+    vein importar_cand(i: stone) -> void {
+        forge d: obsidian = ofs_array_get(imp.c_dir, i)
+        forge e: obsidian = ofs_array_get(imp.c_engine, i)
+        if (tx.len(e) == 0) {
+            oal.toast(tr("arq_nenhum"))
+            return
+        }
+        imp.start(d)
+        oal.refresh()
+    }
+
+    vein abrir_detalhes(v: stone) -> void { abrir_detalhes_lib(lib.gi(v)) }
+
+    vein abrir_detalhes_lib(i: stone) -> void {
+        if (i < 0 || i >= lib.count()) { return }
+        det = i
+        rm_armed = 0
+        p_sel = -1
+        pt_rm_armed = 0
+        _load_patches()
+        _load_shots()
+        if (oal.screen == S_DET) { oal.refresh() } else if (oal.screen == S_IMP) { oal.replace(S_DET) } else { oal.go(S_DET) }
+    }
+
+    vein abrir_config() -> void { oal.go(S_CFG) }
+
+    // ── navegacao: abas, menus suspensos, segurar ────────────────────────
+    vein aba_atual() -> stone {
+        if (oal.screen == S_BIB) { return 0 }
+        if (oal.screen == S_SAVES) { return 1 }
+        if (oal.screen == S_PLUG) { return 2 }
+        if (oal.screen == S_CFG) { return 3 }
+        return -1
+    }
+    vein nav_sel(i: stone) -> bool { return aba_atual() == i }
+    // as abas somem no player (config aberta pela pausa de um jogo)
+    vein nav_visivel() -> bool { return !player.active }
+
+    vein ir_aba(i: stone) -> void {
+        pop = 0
+        if (aba_atual() == i) {
+            oal.scroll = 0
+            oal.refresh()
+            return
+        }
+        if (i == 0) {
+            oal.reset_to(S_BIB)
+        } else if (i == 1) {
+            if (!has_perm) {
+                oal.toast(tr("perm_nao"))
+                return
+            }
+            sv.ensure_library()
+            sv.lvl = 0
+            sv.msg = ""
+            sv.build()
+            oal.reset_to(S_SAVES)
+        } else if (i == 2) {
+            _plg_build()
+            oal.reset_to(S_PLUG)
+        } else {
+            oal.reset_to(S_CFG)
+        }
+    }
+    vein aba_bib() -> void { ir_aba(0) }
+    vein aba_saves() -> void { ir_aba(1) }
+    vein aba_plugins() -> void { ir_aba(2) }
+    vein aba_config() -> void { ir_aba(3) }
+
+    vein pop_is(k: stone) -> bool { return pop == k }
+    vein pop_aberto() -> bool { return pop != 0 }
+    vein fechar_popup() -> void {
+        pop = 0
+        oal.refresh()
+    }
+    vein abrir_menu() -> void {
+        pop = POP_MENU
+        oal.refresh()
+    }
+    vein _pop(k: stone) -> void {
+        pop = k
+        oal.refresh()
+    }
+    vein pop_titulo() -> obsidian {
+        if (pop == POP_JOGO) { return _ds(lib.g_name) }
+        if (pop == POP_MODO) { return tr("modo_titulo") }
+        if (pop == POP_PJ) { return tr("menu") }
+        if (pop == POP_DEL) { return tr("apagar_q") + " " + _ds(lib.g_name) }
+        if (pop == POP_DELF1) { return tr("apagar_arq_q") + " " + _ds(lib.g_name) }
+        if (pop == POP_DELF2) { return tr("apagar_ultima") }
+        if (pop == POP_SV) { return ofs_array_get(sv.r_name, pop_i) }
+        if (pop == POP_SVDEL) { return tr("sv_apagar") + ": " + ofs_array_get(sv.r_name, pop_i) }
+        if (pop == POP_PLG) { return ofs_array_get(pr_nome, pop_i) }
+        if (pop == POP_PLGDEL) { return tr("pl_remover_q") + " " + ofs_array_get(pr_nome, pop_i) }
+        return ""
+    }
+
+    // itens do menu de 3 pontos
+    vein menu_arquivos() -> void {
+        pop = 0
+        abrir_arquivos()
+    }
+    vein menu_atualizar_bib() -> void {
+        pop = 0
+        lib.update_view()
+        oal.toast(tr("bib_atualizada"))
+        oal.refresh()
+    }
+    vein menu_sobre() -> void {
+        pop = 0
+        cfg.settings_tab = 0
+        oal.reset_to(S_CFG)
+        oal.scroll = 1000000
+    }
+    vein menu_config() -> void {
+        pop = 0
+        abrir_config()
+    }
+    vein menu_importar_lista() -> void {
+        pop = 0
+        reescanear()
+    }
+    vein menu_plg_atualizar() -> void {
+        pop = 0
+        plg_atualizar()
+    }
+    vein menu_plg_local() -> void {
+        pop = 0
+        plg_importar_local()
+    }
+    vein menu_plg_url() -> void {
+        pop = 0
+        plg_editar_url()
+    }
+    vein menu_sv_atualizar() -> void {
+        pop = 0
+        sv_recarregar()
+    }
+    vein menu_sv_backup_tudo() -> void {
+        pop = 0
+        sv_backup_tudo()
+    }
+    vein menu_sv_importar() -> void {
+        pop = 0
+        sv_importar()
+    }
+    vein menu_sv_subir() -> void {
+        pop = 0
+        sv.up()
+        oal.refresh()
+    }
+    vein sv_pode_subir() -> bool { return sv.lvl > 0 }
+    vein menu_arq_subir() -> void {
+        pop = 0
+        arq_subir()
+    }
+    vein menu_pasta_app() -> void {
+        pop = 0
+        abrir_pasta_app()
+    }
+    vein menu_det_renomear() -> void {
+        pop = 0
+        abrir_renomear()
+    }
+    vein menu_det_capa() -> void {
+        pop = 0
+        abrir_capa()
+    }
+    vein menu_det_desc() -> void {
+        pop = 0
+        abrir_descricao()
+    }
+
+    // segurar o card do jogo (v = indice da vista)
+    vein menu_jogo(v: stone) -> void {
+        det = lib.gi(v)
+        pop = POP_JOGO
+        oal.refresh()
+    }
+    vein pop_jogo_jogar() -> void {
+        pop = 0
+        forge st = det_status()
+        if (st == 0) { jogar() } else if (st == 4) { jogar_host() } else { abrir_detalhes_lib(det) }
+    }
+    vein pop_jogo_detalhes() -> void {
+        pop = 0
+        abrir_detalhes_lib(det)
+    }
+    vein pop_apagar() -> void { _pop(POP_DEL) }
+    // so a entrada da biblioteca; os arquivos do jogo ficam como estao
+    vein pop_apagar_ok() -> void {
+        pop = 0
+        if (det >= 0) {
+            lib.remove_at(det)
+            det = -1
+            oal.toast(tr("removido"))
+        }
+        if (oal.screen == S_DET) { oal.back() } else { oal.refresh() }
+    }
+    vein pop_tem_dados() -> bool {
+        if (det < 0) { return false }
+        forge dd = _ds(lib.g_data)
+        return tx.len(dd) > 0 && tx.starts(dd, files + "/games/")
+    }
+    vein pop_apagar_arq() -> void { _pop(POP_DELF1) }
+    vein pop_apagar_arq2() -> void { _pop(POP_DELF2) }
+    vein pop_apagar_arq_ok() -> void {
+        pop = 0
+        if (det >= 0) {
+            forge dd = _ds(lib.g_data)
+            if (tx.len(dd) > 0 && tx.starts(dd, files + "/games/")) { bx.remove_tree(dd) }
+            lib.remove_at(det)
+            det = -1
+            oal.toast(tr("removido"))
+        }
+        if (oal.screen == S_DET) { oal.back() } else { oal.refresh() }
+    }
+
+    // segurar linha de saves (i = linha)
+    vein menu_sv(i: stone) -> void {
+        pop_i = i
+        pop = POP_SV
+        oal.refresh()
+    }
+    vein sv_lvl1() -> bool { return sv.lvl == 1 }
+    vein pop_sv_abrir() -> void {
+        pop = 0
+        sv_abrir(pop_i)
+    }
+    vein pop_sv_exportar() -> void {
+        pop = 0
+        sv.open(pop_i)
+        sv.export_current()
+        oal.refresh()
+    }
+    vein pop_sv_backup() -> void {
+        pop = 0
+        sv.open(pop_i)
+        sv.backup_current()
+        oal.refresh()
+    }
+    vein pop_sv_apagar() -> void { _pop(POP_SVDEL) }
+    vein pop_sv_apagar_ok() -> void {
+        pop = 0
+        sv.open(pop_i)
+        sv.del_armed = oal.now_ms
+        sv.delete_current(oal.now_ms)
+        oal.refresh()
+    }
+
+    // segurar linha de plugins (i = linha)
+    vein menu_plg(i: stone) -> void {
+        pop_i = i
+        pop = POP_PLG
+        oal.refresh()
+    }
+    vein _pop_pkg() -> obsidian {
+        if (pop_i < 0 || pop_i >= ofs_array_len(pr_kind)) { return "" }
+        if (ofs_array_get(pr_kind, pop_i) != 1) { return "" }
+        return ofs_array_get(pr_ref, pop_i)
+    }
+    vein pop_plg_pacote() -> bool { return tx.len(_pop_pkg()) > 0 }
+    vein pop_plg_baixar_ok() -> bool {
+        pk_sel = _pop_pkg()
+        return tx.len(pk_sel) > 0 && pk_pode_baixar()
+    }
+    vein pop_plg_instalado() -> bool {
+        pk_sel = _pop_pkg()
+        return tx.len(pk_sel) > 0 && pk_instalado()
+    }
+    vein pop_plg_abrir() -> void {
+        pop = 0
+        abrir_plugin(pop_i)
+    }
+    vein pop_plg_baixar() -> void {
+        pop = 0
+        pk_sel = _pop_pkg()
+        pk_baixar()
+    }
+    vein pop_plg_remover() -> void { _pop(POP_PLGDEL) }
+    vein pop_plg_remover_ok() -> void {
+        pop = 0
+        pk_sel = _pop_pkg()
+        forge i = _pk_i()
+        if (i >= 0) {
+            plg.remove(i)
+            plg.refresh_status()
+            _plg_build()
+            oal.toast(tr("pl_removido"))
+        }
+        oal.refresh()
+    }
+
+    // ── detalhes ─────────────────────────────────────────────────────────
+    vein _ds(a: Array<obsidian>) -> obsidian {
+        if (det < 0 || det >= ofs_array_len(a)) { return "" }
+        return ofs_array_get(a, det)
+    }
+    vein det_nome() -> obsidian { return _ds(lib.g_name) }
+    vein det_capa() -> obsidian { return _ds(lib.g_cover) }
+    vein det_tem_capa() -> bool { return tx.len(det_capa()) > 0 }
+    vein det_icone() -> obsidian { return lib.engine_icon(_ds(lib.g_engine)) }
+    vein det_status() -> stone {
+        if (det < 0 || det >= lib.count()) { return 2 }
+        return lib.status_of(det)
+    }
+    vein det_e_moon() -> bool { return tx.eq(_ds(lib.g_engine), "tactics_moon") }
+    vein det_tem_save() -> bool {
+        if (det < 0) { return false }
+        forge l = save.slots()
+        forge i = 0
+        while (i < ofs_array_len(l)) {
+            forge sl: obsidian = ofs_array_get(l, i)
+            if (bx.exists(save.root + "/" + _ds(lib.g_id) + "/" + sl + ".json")) { return true }
+            i++
+        }
+        return false
+    }
+
+    vein det_info() -> obsidian {
+        if (det < 0 || det >= lib.count()) { return "" }
+        forge e = _ds(lib.g_engine)
+        forge s = tr("motor") + ": " + lib.engine_label(e, _ds(lib.g_engver))
+        if (tx.len(_ds(lib.g_ver)) > 0) { s = s + "\n" + tr("versao") + ": " + _ds(lib.g_ver) }
+        if (tx.len(_ds(lib.g_company)) > 0) { s = s + "\n" + tr("empresa") + ": " + _ds(lib.g_company) }
+        if (tx.len(_ds(lib.g_exe)) > 0) { s = s + "\n" + tr("executavel") + ": " + _ds(lib.g_exe) }
+        s = s + "\n" + tr("tamanho") + ": " + lib.human_size(ofs_array_get(lib.g_size, det))
+        s = s + "\n" + tr("pasta") + ": " + _ds(lib.g_src)
+        forge ad = _ds(lib.g_added)
+        if (tx.len(ad) >= 10) { s = s + "\n" + tr("adicionado") + ": " + tx.sub(ad, 0, 10) }
+        s = s + "\n" + tr("pl_estado") + ": " + lib.status_text(det)
+        forge st = det_status()
+        if (st == 1 && lib.is_plugin_engine(e)) { s = s + "\n\n" + tr("pl_nao_instalado") } else if (st == 1) { s = s + "\n\n" + tr("plugin_breve") }
+        if (st == 2) { s = s + "\n\n" + tr("pl_compat") }
+        return s
+    }
+
+    vein det_patches() -> bool { return lib.motor_suporta_patches(_ds(lib.g_engine)) }
+
+    vein det_desc() -> obsidian {
+        forge d = _ds(lib.g_desc)
+        if (tx.len(d) == 0) { return tr("descricao_vazia") }
+        return d
+    }
+
+    // ── screenshots: ate 6 imagens do jogo (sem copiar; a OAL le o PNG direto) ──
+    vein _shot_add(p: obsidian) -> void {
+        if (tx.len(p) == 0 || ofs_array_len(sh_path) >= 6) { return }
+        if (!bx.exists(p)) { return }
+        forge k = 0
+        while (k < ofs_array_len(sh_path)) {
+            if (tx.eq(ofs_array_get(sh_path, k), p)) { return }
+            k++
+        }
+        ofs_array_push(sh_path, tx.copy(p))
+        ofs_array_push(sh_nome, tx.copy(tx.file_name(p)))
+    }
+    vein _shots_in(d: obsidian, pref: obsidian) -> void {
+        forge fs = bx.list_dir(d, 1)
+        forge k = 0
+        while (k < ofs_array_len(fs) && ofs_array_len(sh_path) < 6) {
+            forge f: obsidian = ofs_array_get(fs, k)
+            k++
+            if (!tx.eq(lib.ext_of(f), "png")) { continue }
+            if (tx.len(pref) > 0 && !tx.starts(f, pref)) { continue }
+            _shot_add(d + "/" + f)
+        }
+    }
+    // MOON.: primeiras BG/CG importadas; Ren'Py/Godot: capa e icone achados por arte_auto;
+    // RPGM: img/titles1
+    vein _load_shots() -> void {
+        sh_path = []
+        sh_nome = []
+        if (det < 0) { return }
+        forge e = _ds(lib.g_engine)
+        if (tx.eq(e, "tactics_moon")) {
+            forge idir = _ds(lib.g_data) + "/images"
+            _shots_in(idir, "BG")
+            _shots_in(idir, "CG")
+        } else if (tx.eq(e, "renpy") || tx.eq(e, "godot")) {
+            _shot_add(_ds(lib.g_cover))
+            _shot_add(_ds(lib.g_icon))
+        } else if (tx.eq(e, "rpgm")) {
+            _shots_in(_ds(lib.g_src) + "/www/img/titles1", "")
+            _shots_in(_ds(lib.g_src) + "/img/titles1", "")
+        }
+    }
+    vein shots_count() -> stone { return ofs_array_len(sh_path) }
+    vein shots_caminho(i: stone) -> obsidian { return ofs_array_get(sh_path, i) }
+    vein shots_nome(i: stone) -> obsidian { return ofs_array_get(sh_nome, i) }
+    vein det_tem_shots() -> bool { return ofs_array_len(sh_path) > 0 }
+
+    vein det_e_web() -> bool {
+        forge e = _ds(lib.g_engine)
+        return tx.eq(e, "rpgm") || tx.eq(e, "tyrano")
+    }
+
+    // ── modo de controle (novel / gamepad), lembrado por jogo ────────────
+    vein _modo_lembrado() -> obsidian {
+        if (det < 0) { return "" }
+        forge e = _ds(lib.g_engine)
+        if (tx.eq(e, "renpy") || tx.eq(e, "godot")) {
+            // a troca feita dentro do jogo grava em <saves>/moon_controle.json
+            forge sv_m = host.controle_salvo(e, _ds(lib.g_src))
+            if (tx.len(sv_m) > 0) { return tx.copy(sv_m) }
+        }
+        return _ds(lib.g_mode)
+    }
+    vein _modo_set(m: obsidian) -> void {
+        if (det >= 0) {
+            ofs_array_set(lib.g_mode, det, m)
+            lib.save()
+        }
+    }
+    // pergunta (bottom sheet) ou usa o modo lembrado; k: 1 jogar, 2 continuar, 3 host
+    vein _pede_modo(k: stone) -> void {
+        forge m = _modo_lembrado()
+        if (tx.len(m) > 0) {
+            _modo_exec(k, m)
+            return
+        }
+        md_pend = k
+        md_lembrar = 1
+        _pop(POP_MODO)
+    }
+    vein _modo_exec(k: stone, m: obsidian) -> void {
+        player.ctrl = m
+        if (k == 1) {
+            _jogar_go()
+        } else if (k == 2) {
+            _continuar_go()
+        } else {
+            _jogar_host_go(m)
+        }
+    }
+    vein _modo_escolhido(m: obsidian) -> void {
+        pop = 0
+        if (md_lembrar == 1) { _modo_set(m) }
+        _modo_exec(md_pend, m)
+    }
+    vein pop_modo_novel() -> void { _modo_escolhido("novel") }
+    vein pop_modo_gamepad() -> void { _modo_escolhido("gamepad") }
+    vein pop_modo_lembrar() -> void {
+        if (md_lembrar == 1) { md_lembrar = 0 } else { md_lembrar = 1 }
+        oal.refresh()
+    }
+    vein md_lembrar_on() -> bool { return md_lembrar == 1 }
+    // rotulo do botao dos detalhes / menu do card; toque percorre perguntar > novel > gamepad
+    vein modo_rotulo() -> obsidian {
+        forge m = _modo_lembrado()
+        forge n = tr("modo_n_ask")
+        if (tx.eq(m, "novel")) { n = tr("modo_n_novel") }
+        if (tx.eq(m, "gamepad")) { n = tr("modo_n_gamepad") }
+        return tr("modo_trocar") + ": " + n
+    }
+    vein modo_ciclar() -> void {
+        forge m = _modo_lembrado()
+        if (tx.len(m) == 0) {
+            _modo_set("novel")
+        } else if (tx.eq(m, "novel")) {
+            _modo_set("gamepad")
+        } else {
+            _modo_set("")
+        }
+        pop = 0
+        oal.refresh()
+    }
+    vein menu_jogo_modo() -> void { modo_ciclar() }
+
+    // menu ⋮ do player
+    forge pj_pag: stone = 0            // paisagem: o sheet nao rola, entao o menu ⋮ tem 2 paginas
+    vein pj_abrir() -> void {
+        pj_pag = 0
+        _pop(POP_PJ)
+    }
+    vein pj_mais() -> void {
+        pj_pag = 1 - pj_pag
+        oal.refresh()
+    }
+    // itens visiveis: retrato mostra tudo; paisagem, metade por pagina
+    vein pj_ver(grupo: stone) -> bool {
+        if (!oal.is_landscape()) { return grupo != 2 }
+        return grupo == pj_pag
+    }
+    vein pj_ver_mais() -> bool { return oal.is_landscape() }
+    vein pj_gamepad() -> bool { return tx.eq(player.ctrl, "gamepad") }
+    vein pj_salvar() -> void {
+        pop = 0
+        abrir_slots_save()
+    }
+    vein pj_carregar() -> void {
+        pop = 0
+        abrir_slots_load()
+    }
+    vein pj_auto() -> void {
+        pop = 0
+        player.toggle_auto()
+    }
+    vein pj_skip() -> void {
+        pop = 0
+        player.toggle_skip()
+    }
+    vein pj_hist() -> void {
+        pop = 0
+        abrir_backlog()
+    }
+    vein pj_esconder() -> void {
+        pop = 0
+        player.toggle_hide()
+    }
+    vein pj_orient() -> void {
+        pop = 0
+        player.toggle_orientation()
+    }
+    vein pj_cfg() -> void {
+        pop = 0
+        abrir_config()
+    }
+    vein pj_sair() -> void {
+        pop = 0
+        sair_jogo()
+    }
+    vein pj_trocar() -> void {
+        pop = 0
+        forge m = "gamepad"
+        if (pj_gamepad()) { m = "novel" }
+        player.ctrl = m
+        if (player.gidx >= 0) {
+            ofs_array_set(lib.g_mode, player.gidx, m)
+            lib.save()
+        }
+        oal.refresh()
+    }
+
+    vein jogar() -> void {
+        if (det_status() != 0) { return }
+        if (det_e_web()) {
+            _jogar_go()
+            return
+        }
+        _pede_modo(1)
+    }
+    vein _jogar_go() -> void {
+        if (det_e_web()) {
+            forge k = plg.resolve_installed(det)
+            if (k < 0) {
+                oal.toast(tr("pl_nao_instalado"))
+                return
+            }
+            sv.ensure_game(_ds(lib.g_engine), _ds(lib.g_id))
+            if (!web.start(det, k)) { oal.toast(tr("web_erro") + ": " + web.error) }
+            return
+        }
+        if (!player.open(det, -1)) {
+            oal.toast(tr("erro_jogo"))
+            return
+        }
+        oal.go(S_PLAYER)
+    }
+
+    // Ren'Py/Godot (pacote native/dex instalado): a hospedagem dentro do app fica em src/host/host.ofs
+    vein jogar_host() -> void {
+        if (det_status() != 4) { return }
+        _pede_modo(3)
+    }
+    vein _estilo_pad() -> obsidian {
+        if (cfg.pad_style == 0) { return "teclado" }
+        if (cfg.pad_style == 2) { return "ps" }
+        if (cfg.pad_style == 3) { return "nintendo" }
+        return "xbox"
+    }
+    vein _jogar_host_go(m: obsidian) -> void {
+        forge i = plg.resolve_installed(det)
+        if (i < 0) {
+            oal.toast(tr("pl_nao_instalado"))
+            return
+        }
+        sv.ensure_game(_ds(lib.g_engine), _ds(lib.g_id))
+        host.set_controle(m, _estilo_pad())
+        if (!host.iniciar(_ds(lib.g_engine), _ds(lib.g_engver), _ds(lib.g_src))) { oal.toast(host.last_error) }
+    }
+
+    vein continuar() -> void {
+        if (det_status() != 0) { return }
+        _pede_modo(2)
+    }
+    vein _continuar_go() -> void {
+        forge gid = _ds(lib.g_id)
+        forge st = save.latest(gid)
+        if (st < 0) {
+            _jogar_go()
+            return
+        }
+        if (!player.open(det, st)) {
+            oal.toast(tr("erro_jogo"))
+            return
+        }
+        oal.go(S_PLAYER)
+    }
+
+    // "Instalar plugin" nos detalhes: abre a tela Plugins com o alvo (motor + versao exata do jogo)
+    vein instalar_plugin() -> void {
+        if (det < 0) { return }
+        alvo_game = det
+        plg.want(_ds(lib.g_engine), _ds(lib.g_engver))
+        if (!plg.index_ok && tx.len(cfg.plugin_index) > 0) { fetch_pending = true }
+        _plg_build()
+        oal.go(S_PLUG)
+    }
+    vein nao_suportado() -> void { oal.toast(tr("plugin_breve")) }
+
+    vein remover() -> void {
+        if (det < 0) { return }
+        if (rm_armed == 0 || oal.now_ms - rm_armed > 5000) {
+            rm_armed = oal.now_ms
+            oal.toast(tr("remover_confirma"))
+            return
+        }
+        // so apaga o que e do app (dados convertidos em files/games/<id>)
+        forge dd = _ds(lib.g_data)
+        if (tx.len(dd) > 0 && tx.starts(dd, files + "/games/")) { bx.remove_tree(dd) }
+        lib.remove_at(det)
+        det = -1
+        oal.toast(tr("removido"))
+        oal.back()
+    }
+
+    // ── renomear (teclado na tela) ───────────────────────────────────────
+    vein abrir_renomear() -> void {
+        edit_text = det_nome()
+        oal.kb_shift = false
+        oal.kb_layer = 0
+        oal.go(S_REN)
+    }
+
+    vein edit_show() -> obsidian { return edit_text + "|" }
+
+    vein cp_str(cp: stone) -> obsidian {
+        forge b = sb.new()
+        tx.utf8(b, cp)
+        forge s = sb.str(b)
+        sb.drop(b)
+        return s
+    }
+
+    // tira o ultimo caractere UTF-8
+    vein drop_last(s: obsidian) -> obsidian {
+        forge n = tx.len(s)
+        if (n == 0) { return s }
+        forge i = n - 1
+        while (i > 0 && (tx.at(s, i) & 192) == 128) { i-- }
+        return tx.sub(s, 0, i)
+    }
+
+    vein edit_key(cp: stone, s: obsidian) -> obsidian {
+        if (cp == 8) { return drop_last(s) }
+        if (cp < 32) { return s }
+        return s + cp_str(cp)
+    }
+
+    vein edit_tecla(cp: stone) -> void {
+        if (cp == 10) {
+            renomear_ok()
+            return
+        }
+        edit_text = edit_key(cp, edit_text)
+        oal.refresh()
+    }
+
+    vein renomear_ok() -> void {
+        forge n = tx.strip(edit_text)
+        if (det >= 0 && tx.len(n) > 0) {
+            ofs_array_set(lib.g_name, det, n)
+            lib.save()
+            lib.update_view()
+            oal.toast(tr("salvo"))
+        }
+        oal.back()
+    }
+
+    // ── capa ─────────────────────────────────────────────────────────────
+    vein abrir_capa() -> void {
+        if (det < 0) { return }
+        lib.list_covers(det)
+        oal.go(S_CAPA)
+    }
+
+    vein escolher_capa(k: stone) -> void {
+        if (det < 0) { return }
+        ofs_array_set(lib.g_cover, det, lib.capas_img(k))
+        lib.save()
+        oal.back()
+    }
+
+    // ── descricao (teclado na tela, como o renomear) ─────────────────────
+    vein abrir_descricao() -> void {
+        if (det < 0) { return }
+        desc_text = _ds(lib.g_desc)
+        oal.kb_shift = false
+        oal.kb_layer = 0
+        oal.go(S_DESC)
+    }
+    vein desc_show() -> obsidian { return desc_text + "|" }
+    vein desc_tecla(cp: stone) -> void {
+        // Enter insere nova linha; o check da barra salva (descricao_ok)
+        if (cp == 10) { desc_text = desc_text + "\n" } else { desc_text = edit_key(cp, desc_text) }
+        oal.refresh()
+    }
+    vein descricao_ok() -> void {
+        if (det >= 0) {
+            ofs_array_set(lib.g_desc, det, tx.strip(desc_text))
+            lib.save()
+            oal.toast(tr("salvo"))
+        }
+        oal.back()
+    }
+
+    // ── patches ──────────────────────────────────────────────────────────
+    vein _load_patches() -> void {
+        p_id = []
+        p_nome = []
+        p_sub = []
+        if (det < 0) { return }
+        forge gid = _ds(lib.g_id)
+        forge act = patch.active_id(gid)
+        forge m = json.mark()
+        forge l = patch.list_patches(gid)
+        forge c = json.first(l)
+        while (c >= 0) {
+            forge id = tx.copy(json.gs(c, "id", ""))
+            forge meta = json.get(c, "meta")
+            forge nm = tx.copy(json.gs(meta, "lang", "?") + " — " + json.gs(meta, "author", ""))
+            forge sub = tx.copy(tx.num(json.gi(c, "strings_count", 0)) + " textos · v" + json.gs(meta, "version", ""))
+            if (tx.eq(id, act)) { sub = sub + " · " + tr("patch_ativo") }
+            ofs_array_push(p_id, id)
+            ofs_array_push(p_nome, nm)
+            ofs_array_push(p_sub, sub)
+            c = json.next(c)
+        }
+        json.release(m)
+    }
+    vein patches_count() -> stone { return ofs_array_len(p_id) }
+    vein patches_nome(i: stone) -> obsidian { return ofs_array_get(p_nome, i) }
+    vein patches_sub(i: stone) -> obsidian { return ofs_array_get(p_sub, i) }
+    vein patches_icone(i: stone) -> obsidian {
+        forge gid = _ds(lib.g_id)
+        forge pid: obsidian = ofs_array_get(p_id, i)
+        if (tx.eq(patch.active_id(gid), pid)) { return "check" }
+        return "globe"
+    }
+
+    // patch ativo so vale sobre o texto EN: desliga o idioma JP
+    vein _patch_forca_en() -> void {
+        if (tx.eq(cfg.game_lang, "ja")) {
+            cfg.game_lang = "en"
+            cfg.save()
+        }
+    }
+
+    vein patch_toggle(i: stone) -> void {
+        forge gid = _ds(lib.g_id)
+        forge pid: obsidian = ofs_array_get(p_id, i)
+        p_sel = i
+        if (tx.eq(patch.active_id(gid), pid)) {
+            patch.activate(gid, "")
+            oal.toast(tr("patch_off"))
+        } else {
+            patch.activate(gid, pid)
+            _patch_forca_en()
+            oal.toast(tr("patch_on"))
+        }
+        _load_patches()
+        oal.refresh()
+    }
+
+    vein patch_tem_sel() -> bool { return p_sel >= 0 && p_sel < ofs_array_len(p_id) }
+
+    // remove o patch tocado por ultimo (pede segundo toque, como o remover do jogo)
+    vein patch_remover() -> void {
+        if (!patch_tem_sel()) { return }
+        if (pt_rm_armed == 0 || oal.now_ms - pt_rm_armed > 5000) {
+            pt_rm_armed = oal.now_ms
+            oal.toast(tr("patch_remover_confirma"))
+            return
+        }
+        patch.uninstall(_ds(lib.g_id), ofs_array_get(p_id, p_sel))
+        pt_rm_armed = 0
+        p_sel = -1
+        _load_patches()
+        oal.toast(tr("patch_removido"))
+        oal.refresh()
+    }
+
+    // grava <jogo>_template.json em /sdcard/MOON/export com todas as strings de exibicao
+    vein patch_exportar() -> void {
+        if (det < 0) { return }
+        forge gid = _ds(lib.g_id)
+        forge out = "/sdcard/MOON/export/" + gid + "_template.json"
+        forge n = patch.export_template(gid, _ds(lib.g_data) + "/scripts", out, "en")
+        if (n == 0) {
+            oal.toast(tr("patch_exportar_vazio"))
+            return
+        }
+        oal.toast(tr("patch_exportado") + ": " + out + " (" + tx.num(n) + ")")
+    }
+
+    vein patch_install_file(path: obsidian) -> bool {
+        forge gid = _ds(lib.g_id)
+        forge id = patch.install(gid, path, save.now_unix())
+        if (tx.len(id) == 0) {
+            oal.toast(tr("patch_invalido") + ": " + patch.error)
+            return false
+        }
+        patch.activate(gid, id)
+        _patch_forca_en()
+        _load_patches()
+        oal.toast(tr("patch_instalado"))
+        return true
+    }
+
+    vein patch_incluso() -> void {
+        forge b = android.asset_read("patch_ptbr_exemplo.json")
+        if (b == null) {
+            oal.toast(tr("patch_invalido"))
+            return
+        }
+        forge tmp = files + "/patch_ptbr_exemplo.json"
+        bx.write_file(tmp, b as stone, android.asset_len)
+        patch_install_file(tmp)
+        bx.delete(tmp)
+        oal.refresh()
+    }
+
+    vein patch_de_arquivo() -> void {
+        arq.mode = 1
+        arq.open("/storage/emulated/0/Download")
+        oal.go(S_ARQ)
+    }
+
+    // patch no player (menu de pausa)
+    vein patch_on() -> bool { return tx.len(patch.active_id(player.game_id)) > 0 }
+    vein set_patch(on: stone) -> void {
+        forge gid = player.game_id
+        if (on == 0) {
+            patch.activate(gid, "")
+            oal.toast(tr("patch_off"))
+        } else {
+            forge m = json.mark()
+            forge l = patch.list_patches(gid)
+            forge first = json.first(l)
+            forge pid = ""
+            if (first >= 0) { pid = tx.copy(json.gs(first, "id", "")) }
+            json.release(m)
+            if (tx.len(pid) == 0) {
+                oal.toast(tr("sem_patch"))
+            } else {
+                patch.activate(gid, pid)
+                oal.toast(tr("patch_on"))
+                if (player.lang_jp) { player.set_lang_jp(false) } else { _patch_forca_en() }
+            }
+        }
+        player.dirty_scene = true
+        if (player.waiting == player.W_SAY) { player.show_line(player.cur_ins) }
+        oal.refresh()
+    }
+
+    // ── plugins ──────────────────────────────────────────────────────────
+    // motores (cabecalhos da tela Plugins), na ordem de exibicao
+    vein _pl_engine(i: stone) -> obsidian {
+        if (i == 0) { return "tactics_moon" }
+        if (i == 1) { return "renpy" }
+        if (i == 2) { return "godot" }
+        if (i == 3) { return "rpgm" }
+        if (i == 4) { return "tyrano" }
+        if (i == 5) { return "unity" }
+        return "windows"
+    }
+    vein _pl_engine_count() -> stone { return 7 }
+    vein _pl_title(e: obsidian) -> obsidian {
+        if (tx.eq(e, "tactics_moon")) { return "tactics_moon - MOON." }
+        if (tx.eq(e, "renpy")) { return "renpy - Ren'Py" }
+        if (tx.eq(e, "godot")) { return "godot - Godot" }
+        if (tx.eq(e, "rpgm")) { return "rpgm - RPG Maker MV/MZ" }
+        if (tx.eq(e, "tyrano")) { return "tyrano - TyranoBuilder" }
+        if (tx.eq(e, "unity")) { return "unity - Unity (Windows)" }
+        return "windows - .exe"
+    }
+    vein _games_of(e: obsidian) -> stone {
+        forge n = 0
+        forge k = 0
+        while (k < lib.count()) {
+            if (tx.eq(ofs_array_get(lib.g_engine, k), e)) { n++ }
+            k++
+        }
+        return n
+    }
+
+    // contagens de pacotes de um motor (instalados / so no indice)
+    vein _pkg_ids(e: obsidian) -> Array<obsidian> {
+        forge out: Array<obsidian> = []
+        forge k = 0
+        while (k < ofs_array_len(plg.i_id)) {
+            if (tx.eq(ofs_array_get(plg.i_motor, k), e)) { ofs_array_push(out, ofs_array_get(plg.i_id, k)) }
+            k++
+        }
+        forge x = 0
+        while (x < ofs_array_len(plg.x_id)) {
+            if (tx.eq(ofs_array_get(plg.x_motor, x), e)) {
+                forge id: obsidian = ofs_array_get(plg.x_id, x)
+                forge dup = false
+                forge q = 0
+                while (q < ofs_array_len(out)) {
+                    if (tx.eq(ofs_array_get(out, q), id)) { dup = true }
+                    q++
+                }
+                if (!dup) { ofs_array_push(out, id) }
+            }
+            x++
+        }
+        // do mais novo para o mais antigo (versao exata do motor)
+        forge sorted: Array<obsidian> = []
+        forge a = 0
+        while (a < ofs_array_len(out)) {
+            forge id2: obsidian = ofs_array_get(out, a)
+            forge vm2 = _pkg_vm(id2)
+            forge pos = ofs_array_len(sorted)
+            forge j = 0
+            while (j < ofs_array_len(sorted)) {
+                if (plg.ver_cmp(vm2, _pkg_vm(ofs_array_get(sorted, j))) > 0) {
+                    pos = j
+                    break
+                }
+                j++
+            }
+            ofs_array_push(sorted, id2)
+            forge m = ofs_array_len(sorted) - 1
+            while (m > pos) {
+                ofs_array_set(sorted, m, ofs_array_get(sorted, m - 1))
+                m--
+            }
+            ofs_array_set(sorted, pos, id2)
+            a++
+        }
+        return sorted
+    }
+    vein _pkg_vm(id: obsidian) -> obsidian {
+        forge k = plg.find_installed(id)
+        if (k >= 0) { return ofs_array_get(plg.i_vm, k) }
+        forge x = plg.find_index(id)
+        if (x >= 0) { return ofs_array_get(plg.x_vm, x) }
+        return ""
+    }
+
+    vein _plg_build() -> void {
+        pr_kind = []
+        pr_ref = []
+        pr_nome = []
+        pr_sub = []
+        pr_icon = []
+        pr_badge = []
+        forge e = 0
+        while (e < _pl_engine_count()) {
+            forge key = _pl_engine(e)
+            forge ids = _pkg_ids(key)
+            forge ninst = 0
+            forge q = 0
+            while (q < ofs_array_len(ids)) {
+                if (plg.find_installed(ofs_array_get(ids, q)) >= 0) { ninst++ }
+                q++
+            }
+            forge st = tr("pl_compat")
+            if (e == 0) { st = tr("pl_nativo") }
+            else if (lib.is_plugin_engine(key)) { st = tx.num(ninst) + " " + tr("pl_instalado_v") + " · " + tx.num(ofs_array_len(ids)) + " " + tr("pl_pacotes") }
+            ofs_array_push(pr_kind, 0)
+            ofs_array_push(pr_ref, key)
+            ofs_array_push(pr_nome, _pl_title(key))
+            ofs_array_push(pr_sub, st)
+            ofs_array_push(pr_icon, lib.engine_icon(key))
+            ofs_array_push(pr_badge, tx.num(_games_of(key)))
+            forge z = 0
+            while (z < ofs_array_len(ids)) {
+                forge id: obsidian = ofs_array_get(ids, z)
+                forge ik = plg.find_installed(id)
+                forge xk = plg.find_index(id)
+                forge sub = tr("pl_disponivel")
+                forge badge = "+"
+                if (ik >= 0) {
+                    sub = tr("pl_instalado_v") + " v" + ofs_array_get(plg.i_ver, ik) + " · " + ofs_array_get(plg.i_tipo, ik)
+                    badge = "v" + ofs_array_get(plg.i_ver, ik)
+                    if (plg.has_update(ik)) { sub = sub + " · " + tr("pl_atualizacao") }
+                } else if (xk >= 0) {
+                    sub = tr("pl_disponivel") + " v" + ofs_array_get(plg.x_ver, xk) + " · " + lib.human_size(ofs_array_get(plg.x_size, xk))
+                }
+                ofs_array_push(pr_kind, 1)
+                ofs_array_push(pr_ref, id)
+                ofs_array_push(pr_nome, "    " + plg.ver_label(_pkg_vm(id)))
+                ofs_array_push(pr_sub, sub)
+                ofs_array_push(pr_icon, lib.engine_icon(key))
+                ofs_array_push(pr_badge, badge)
+                z++
+            }
+            e++
+        }
+    }
+
+    vein plugs_count() -> stone { return ofs_array_len(pr_nome) }
+    vein plugs_nome(i: stone) -> obsidian { return ofs_array_get(pr_nome, i) }
+    vein plugs_estado(i: stone) -> obsidian { return ofs_array_get(pr_sub, i) }
+    vein plugs_icone(i: stone) -> obsidian { return ofs_array_get(pr_icon, i) }
+    vein plugs_badge(i: stone) -> obsidian { return ofs_array_get(pr_badge, i) }
+    vein abrir_plugin(i: stone) -> void {
+        forge ref: obsidian = ofs_array_get(pr_ref, i)
+        if (ofs_array_get(pr_kind, i) == 1) {
+            pk_sel = ref
+            pk_rm_armed = 0
+            oal.go(S_PKG)
+            return
+        }
+        pl_sel = 0
+        forge e = 0
+        while (e < _pl_engine_count()) {
+            if (tx.eq(_pl_engine(e), ref)) { pl_sel = e }
+            e++
+        }
+        oal.go(S_PLDET)
+    }
+
+    // tela Plugins: abrir / atualizar
+    vein abrir_plugins() -> void {
+        _plg_build()
+        oal.go(S_PLUG)
+    }
+    vein plg_busy() -> bool { return plg.busy || fetch_pending }
+    vein plg_label() -> obsidian {
+        if (fetch_pending) { return tr("pl_atualizar_lista") + "…" }
+        return plg.dl_label
+    }
+    vein plg_msg() -> obsidian {
+        if (tx.len(plg.msg) > 0) { return plg.msg }
+        return plg.index_msg
+    }
+    vein plg_repo_texto() -> obsidian {
+        forge u = cfg.plugin_index
+        if (tx.len(u) == 0) { u = tr("pl_url_vazia") }
+        return tr("pl_url") + ": " + u
+    }
+    vein plg_atualizar() -> void {
+        plg.msg = ""
+        plg.scan()
+        if (tx.len(cfg.plugin_index) > 0) {
+            fetch_pending = true
+            oal.set_animating(true)
+        } else {
+            plg.index_msg = tr("pl_sem_url")
+        }
+        _plg_build()
+        oal.refresh()
+    }
+    vein _plg_after_index() -> void {
+        if (!fetch_pending && !plg.busy) { oal.set_animating(false) }
+        if (alvo_game >= 0) { plg.want(ofs_array_get(lib.g_engine, alvo_game), ofs_array_get(lib.g_engver, alvo_game)) }
+        _plg_build()
+    }
+    vein plg_cancelar() -> void {
+        plg.cancel()
+        oal.refresh()
+    }
+
+    // banner do jogo-alvo
+    vein plg_tem_alvo() -> bool { return alvo_game >= 0 && alvo_game < lib.count() }
+    vein plg_alvo_titulo() -> obsidian {
+        if (!plg_tem_alvo()) { return "" }
+        return tr("pl_alvo") + ": " + ofs_array_get(lib.g_name, alvo_game)
+    }
+    vein plg_alvo_texto() -> obsidian {
+        if (!plg_tem_alvo()) { return "" }
+        forge id = plg.w_motor + "-" + plg.w_vm
+        if (plg.pk_state == 0) { return id + ": " + tr("pl_ok_exato") }
+        if (plg.pk_state == 1) { return tr("pl_precisa") + " " + id + " (" + lib.human_size(ofs_array_get(plg.x_size, plg.pk_x)) + ")" }
+        if (plg.pk_state == 2) { return tr("pl_precisa") + " " + id + ". " + tr("pl_proximo_aviso") + "\n→ " + ofs_array_get(plg.i_id, plg.pk_i) }
+        if (plg.pk_state == 3) { return tr("pl_precisa") + " " + id + ". " + tr("pl_proximo_aviso") + "\n→ " + ofs_array_get(plg.x_id, plg.pk_x) }
+        return tr("pl_precisa") + " " + id + ". " + tr("pl_nenhum")
+    }
+    vein plg_alvo_acao() -> stone {
+        if (!plg_tem_alvo() || plg.busy) { return 0 }
+        if (plg.pk_state == 1) { return 1 }
+        if (plg.pk_state == 2) { return 2 }
+        if (plg.pk_state == 3) { return 3 }
+        return 0
+    }
+    vein plg_alvo_baixar() -> void {
+        if (plg.pk_x < 0) { return }
+        pending_choice = ""
+        if (plg.pk_state == 3) {
+            pending_choice = ofs_array_get(lib.g_id, alvo_game)
+            pending_choice_id = ofs_array_get(plg.x_id, plg.pk_x)
+        }
+        if (!plg.start_download(plg.pk_x)) { oal.refresh() }
+        oal.refresh()
+    }
+    vein plg_alvo_usar() -> void {
+        if (plg.pk_i < 0 || alvo_game < 0) { return }
+        plg.choice_set(ofs_array_get(lib.g_id, alvo_game), ofs_array_get(plg.i_id, plg.pk_i))
+        plg.refresh_status()
+        oal.toast(tr("pl_instalado"))
+        alvo_game = -1
+        oal.back()
+        oal.refresh()
+    }
+    // depois de um download: atualiza listas e, se era o "mais proximo", grava a escolha
+    vein _plg_after_install() -> void {
+        plg.refresh_status()
+        if (tx.len(pending_choice) > 0 && plg.find_installed(pending_choice_id) >= 0) {
+            plg.choice_set(pending_choice, pending_choice_id)
+            plg.refresh_status()
+        }
+        pending_choice = ""
+        if (alvo_game >= 0) { plg.want(ofs_array_get(lib.g_engine, alvo_game), ofs_array_get(lib.g_engver, alvo_game)) }
+        _plg_build()
+        if (tx.len(plg.msg) > 0) { oal.toast(plg.msg) }
+    }
+
+    // importar .moonpack local (de Download)
+    vein plg_importar_local() -> void {
+        if (!has_perm) {
+            oal.toast(tr("perm_nao"))
+            return
+        }
+        arq.mode = 2
+        arq.open("/storage/emulated/0/Download")
+        oal.go(S_ARQ)
+    }
+    // instalacao em passos: o fim chega por _plg_frame -> _plg_after_install
+    vein _plg_install_local(path: obsidian) -> void {
+        if (!plg.import_local(path)) {
+            if (tx.len(plg.msg) > 0) { oal.toast(plg.msg) }
+            return
+        }
+        oal.refresh()
+    }
+
+    // URL do repositorio
+    vein plg_editar_url() -> void {
+        url_text = cfg.plugin_index
+        oal.kb_shift = false
+        oal.kb_layer = 0
+        oal.go(S_URL)
+    }
+    vein url_show() -> obsidian { return url_text + "|" }
+    vein url_tecla(cp: stone) -> void {
+        if (cp == 10) {
+            url_ok()
+            return
+        }
+        url_text = edit_key(cp, url_text)
+        oal.refresh()
+    }
+    vein url_ok() -> void {
+        cfg.plugin_index = tx.strip(url_text)
+        cfg.save()
+        plg.index_ok = false
+        oal.toast(tr("salvo"))
+        oal.back()
+    }
+
+    // detalhe de um pacote
+    vein _pk_i() -> stone { return plg.find_installed(pk_sel) }
+    vein _pk_x() -> stone { return plg.find_index(pk_sel) }
+    vein pk_nome() -> obsidian { return pk_sel }
+    vein pk_instalado() -> bool { return _pk_i() >= 0 }
+    vein pk_pode_baixar() -> bool {
+        if (plg.busy) { return false }
+        forge x = _pk_x()
+        if (x < 0) { return false }
+        forge i = _pk_i()
+        return i < 0 || plg.has_update(i)
+    }
+    vein pk_texto_baixar() -> obsidian {
+        if (_pk_i() >= 0) { return tr("pl_atualizar") }
+        return tr("pl_instalar")
+    }
+    vein pk_info() -> obsidian {
+        forge i = _pk_i()
+        forge x = _pk_x()
+        forge s = ""
+        if (i >= 0) {
+            s = ofs_array_get(plg.i_nome, i) + "\n" + tr("pl_estado") + ": " + tr("pl_instalado_v") + "\n"
+            s = s + tr("pl_motor_versao") + ": " + ofs_array_get(plg.i_vm, i) + "\n"
+            s = s + tr("pl_pacote_versao") + ": " + ofs_array_get(plg.i_ver, i) + "\n"
+            s = s + tr("pl_tipo") + ": " + ofs_array_get(plg.i_tipo, i) + "\n"
+            s = s + tr("pl_pasta") + ": " + ofs_array_get(plg.i_dir, i)
+            if (plg.has_update(i)) { s = s + "\n" + tr("pl_atualizacao") + ": v" + ofs_array_get(plg.x_ver, x) }
+        } else if (x >= 0) {
+            s = ofs_array_get(plg.x_nome, x) + "\n" + tr("pl_estado") + ": " + tr("pl_disponivel") + "\n"
+            s = s + tr("pl_motor_versao") + ": " + ofs_array_get(plg.x_vm, x) + "\n"
+            s = s + tr("pl_pacote_versao") + ": " + ofs_array_get(plg.x_ver, x) + "\n"
+            s = s + tr("pl_tipo") + ": " + ofs_array_get(plg.x_tipo, x) + "\n"
+            s = s + lib.human_size(ofs_array_get(plg.x_size, x))
+        }
+        if (plg.busy) { s = s + "\n\n" + plg.dl_label + " " + tx.num(plg.dl_pct) + "%" }
+        if (tx.len(plg.msg) > 0) { s = s + "\n\n" + plg.msg }
+        return s
+    }
+    vein pk_baixar() -> void {
+        forge x = _pk_x()
+        pending_choice = ""
+        if (x >= 0) { plg.start_download(x) }
+        oal.refresh()
+    }
+    vein pk_remover() -> void {
+        forge i = _pk_i()
+        if (i < 0) { return }
+        if (pk_rm_armed == 0 || oal.now_ms - pk_rm_armed > 5000) {
+            pk_rm_armed = oal.now_ms
+            oal.toast(tr("pl_remover_confirma"))
+            return
+        }
+        plg.remove(i)
+        plg.refresh_status()
+        _plg_build()
+        oal.toast(tr("pl_removido"))
+        oal.back()
+    }
+
+    // tela de detalhe do motor
+    vein pl_nome() -> obsidian { return _pl_title(_pl_engine(pl_sel)) }
+    vein pl_estado() -> obsidian { return tr("pl_estado") + ": " + ofs_array_get(pr_sub, _pl_row(pl_sel)) }
+    vein _pl_row(e: stone) -> stone {
+        forge k = 0
+        while (k < ofs_array_len(pr_kind)) {
+            if (ofs_array_get(pr_kind, k) == 0 && tx.eq(ofs_array_get(pr_ref, k), _pl_engine(e))) { return k }
+            k++
+        }
+        return 0
+    }
+    vein pl_desc() -> obsidian {
+        forge e = _pl_engine(pl_sel)
+        if (tx.eq(e, "tactics_moon")) { return tr("pl_moon_desc") }
+        if (tx.eq(e, "renpy")) { return tr("pl_renpy_desc") }
+        if (tx.eq(e, "godot")) { return tr("pl_motor_godot_desc") }
+        if (tx.eq(e, "rpgm")) { return tr("pl_motor_rpgm_desc") }
+        if (tx.eq(e, "tyrano")) { return tr("pl_motor_tyrano_desc") }
+        if (tx.eq(e, "unity")) { return tr("pl_unity_desc") }
+        return tr("pl_windows_desc")
+    }
+    vein pl_det() -> obsidian {
+        forge e = _pl_engine(pl_sel)
+        if (tx.eq(e, "tactics_moon")) { return tr("det_moon") }
+        if (tx.eq(e, "renpy")) { return tr("det_renpy") }
+        if (tx.eq(e, "godot")) { return tr("det_godot") }
+        if (tx.eq(e, "rpgm")) { return tr("det_rpgm") }
+        if (tx.eq(e, "tyrano")) { return tr("det_tyrano") }
+        if (tx.eq(e, "unity")) { return tr("det_unity") }
+        return tr("det_windows")
+    }
+    vein pl_icone() -> obsidian { return lib.engine_icon(_pl_engine(pl_sel)) }
+    vein _pl_games() -> Array<stone> {
+        forge out: Array<stone> = []
+        forge k = 0
+        while (k < lib.count()) {
+            if (tx.eq(ofs_array_get(lib.g_engine, k), _pl_engine(pl_sel))) { ofs_array_push(out, k) }
+            k++
+        }
+        return out
+    }
+    vein pljogos_count() -> stone { return ofs_array_len(_pl_games()) }
+    vein pljogos_nome(i: stone) -> obsidian { return ofs_array_get(lib.g_name, ofs_array_get(_pl_games(), i)) }
+    vein pljogos_sub(i: stone) -> obsidian { return lib.status_text(ofs_array_get(_pl_games(), i)) }
+    vein pljogos_icone(i: stone) -> obsidian { return pl_icone() }
+    vein pljogo_abrir(i: stone) -> void { abrir_detalhes_lib(ofs_array_get(_pl_games(), i)) }
+
+    // ── saves ────────────────────────────────────────────────────────────
+    vein abrir_saves() -> void {
+        if (!has_perm) {
+            oal.toast(tr("perm_nao"))
+            return
+        }
+        sv.ensure_library()
+        sv.lvl = 0
+        sv.msg = ""
+        sv.build()
+        oal.go(S_SAVES)
+    }
+    // dos detalhes do jogo: abre a lista direto nos arquivos dele
+    vein abrir_saves_jogo() -> void {
+        if (!has_perm) {
+            oal.toast(tr("perm_nao"))
+            return
+        }
+        sv.ensure_library()
+        sv.sel_motor = sv.motor_key(_ds(lib.g_engine))
+        sv.sel_game = _ds(lib.g_id)
+        sv.ensure_game(_ds(lib.g_engine), sv.sel_game)
+        sv.lvl = 2
+        sv.msg = ""
+        sv.build()
+        oal.go(S_SAVES)
+    }
+    vein sv_abrir(i: stone) -> void {
+        sv.open(i)
+        oal.scroll = 0
+        oal.refresh()
+    }
+    vein sv_biblioteca() -> void { oal.reset_to(S_BIB) }
+    vein sv_recarregar() -> void {
+        sv.build()
+        oal.refresh()
+    }
+    vein sv_exportar() -> void {
+        sv.export_current()
+        oal.refresh()
+    }
+    vein sv_backup() -> void {
+        sv.backup_current()
+        oal.refresh()
+    }
+    vein sv_backup_tudo() -> void {
+        sv.backup_all()
+        oal.refresh()
+    }
+    vein sv_apagar() -> void {
+        sv.delete_current(oal.now_ms)
+        oal.refresh()
+    }
+    vein sv_importar() -> void {
+        sv.scan_zips()
+        oal.go(S_SAVEIMP)
+    }
+    vein sv_importar_zip(i: stone) -> void {
+        sv.import_zip(ofs_array_get(sv.c_path, i))
+        oal.toast(sv.msg)
+        oal.back()
+        oal.refresh()
+    }
+
+    // ── configuracoes ────────────────────────────────────────────────────
+    vein aba(i: stone) -> void {
+        cfg.settings_tab = i
+        oal.scroll = 0
+        oal.refresh()
+    }
+    vein lang_is(l: obsidian) -> bool { return tx.eq(cfg.lang, l) }
+    vein set_lang(i: stone) -> void {
+        if (i == 1) { cfg.lang = "en" } else if (i == 2) { cfg.lang = "es" } else { cfg.lang = "pt" }
+        cfg.save()
+        oal.refresh()
+    }
+    vein set_theme(i: stone) -> void {
+        if (i == 6) { cfg.start_custom() } else { cfg.theme = i }
+        cfg.save()
+        cfg.apply_theme()
+        oal.refresh()
+    }
+    vein temas_count() -> stone { return cfg.THEME_COUNT }
+    vein temas_nome(i: stone) -> obsidian { return cfg.theme_name(i) }
+    vein temas_icone(i: stone) -> obsidian {
+        if (cfg.theme == i) { return "check" }
+        return "palette"
+    }
+    vein temas_sub(i: stone) -> obsidian {
+        return ""
+    }
+    vein abrir_cores() -> void {
+        if (cfg.theme != 6) { cfg.start_custom() }
+        cfg.save()
+        cfg.apply_theme()
+        oal.go(S_CORES)
+    }
+    vein restaurar_tema() -> void {
+        cfg.reset_theme()
+        cfg.save()
+        cfg.apply_theme()
+        oal.toast(tr("tema_restaurado"))
+        oal.refresh()
+    }
+    // lista de cores do tema personalizado
+    forge cor_sel: stone = 0
+    forge hex_text: obsidian = ""
+    vein cores_count() -> stone { return cfg.COLOR_COUNT }
+    vein cores_nome(i: stone) -> obsidian { return cfg.color_name(i) }
+    vein cores_sub(i: stone) -> obsidian { return cfg.hex(cfg.color(i)) }
+    vein cores_icone(i: stone) -> obsidian { return "palette" }
+    vein cor_abrir(i: stone) -> void {
+        cor_sel = i
+        hex_text = cfg.hex(cfg.color(i))
+        oal.kb_shift = false
+        oal.kb_layer = 2                  // teclado hex (0-9 A-F)
+        oal.go(S_COR)
+    }
+    vein cor_nome() -> obsidian { return cfg.color_name(cor_sel) }
+    vein cor_valor() -> stone { return cfg.color(cor_sel) }
+    vein cor_set(v: stone) -> void {
+        cfg.set_color(cor_sel, v)
+        hex_text = cfg.hex(v)
+        cfg.apply_theme()
+        cfg.save()
+    }
+    vein hex_show() -> obsidian { return hex_text + "|" }
+    vein hex_tecla(cp: stone) -> void {
+        if (cp == 10) {
+            oal.back()
+            return
+        }
+        forge ok = (cp >= 48 && cp <= 57) || (cp >= 65 && cp <= 70) || (cp >= 97 && cp <= 102)
+        if (cp == 8 && tx.len(hex_text) > 1) {
+            hex_text = tx.sub(hex_text, 0, tx.len(hex_text) - 1)
+        } else if (ok && tx.len(hex_text) < 7) {
+            hex_text = hex_text + tx.upper(cp_str(cp))
+        }
+        if (tx.len(hex_text) == 7) {
+            forge v = 0
+            forge k = 1
+            while (k < 7) {
+                forge c = tx.at(hex_text, k)
+                forge d = c - 48
+                if (c >= 65) { d = c - 55 }
+                v = v * 16 + d
+                k++
+            }
+            cor_set(v)
+        }
+        oal.refresh()
+    }
+    vein set_text_size(v: stone) -> void {
+        cfg.text_size = v
+        cfg.save()
+        oal.set_text_scale(v)
+    }
+    vein set_speed(v: stone) -> void {
+        cfg.text_speed = v
+        cfg.save()
+    }
+    vein set_auto(v: stone) -> void {
+        cfg.auto_delay = v
+        cfg.save()
+    }
+    vein set_bgm(v: stone) -> void {
+        cfg.vol_bgm = v
+        cfg.save()
+        player.apply_volumes()
+    }
+    vein set_voice(v: stone) -> void {
+        cfg.vol_voice = v
+        cfg.save()
+        player.apply_volumes()
+    }
+    vein set_opac(v: stone) -> void {
+        cfg.ctrl_opacity = v
+        cfg.save()
+        oal.set_overlay_opacity(v)
+    }
+    vein set_csize(v: stone) -> void {
+        cfg.ctrl_size = v
+        cfg.save()
+        oal.set_overlay_scale(v)
+    }
+    vein set_side(v: stone) -> void {
+        cfg.dpad_side = v
+        cfg.save()
+        oal.refresh()
+    }
+    vein set_pad_show(v: stone) -> void {
+        cfg.pad_show = v
+        cfg.save()
+        oal.refresh()
+    }
+    vein set_pad_auto(v: stone) -> void {
+        cfg.pad_auto = v
+        cfg.save()
+        oal.refresh()
+    }
+    vein set_pad_style(v: stone) -> void {
+        cfg.pad_style = v
+        cfg.save()
+        oal.refresh()
+    }
+    // 0 = padrao do estilo confirma; 1 = trocado (cancelar confirma)
+    vein pad_swapped() -> bool { return ((cfg.pad_swap >> cfg.pad_style) & 1) == 1 }
+    vein set_pad_swap(v: stone) -> void {
+        forge bit = 1 << cfg.pad_style
+        cfg.pad_swap = cfg.pad_swap & (15 - bit)
+        if (v == 1) { cfg.pad_swap = cfg.pad_swap | bit }
+        cfg.save()
+        oal.refresh()
+    }
+    // gamepad visivel no player: ligado, interface visivel e sem controle fisico
+    vein pad_visible() -> bool {
+        if (!tx.eq(player.ctrl, "gamepad") || !player.show_controls()) { return false }
+        if (cfg.pad_auto == 1 && oal.pad_connected) { return false }
+        return true
+    }
+    // Papel de cada botao: 0 confirmar, 1 cancelar, 2 menu, 3 esconder interface.
+    // Layout base (cima, direita, baixo, esquerda): Xbox/PS/teclado = esconder,
+    // cancelar, confirmar, menu; Nintendo = menu, confirmar, cancelar, esconder.
+    vein pad_role(slot: stone) -> stone {
+        forge r = 3
+        if (cfg.pad_style == oal.PAD_NINTENDO) {
+            if (slot == oal.SLOT_TOP) { r = 2 }
+            if (slot == oal.SLOT_RIGHT) { r = 0 }
+            if (slot == oal.SLOT_BOTTOM) { r = 1 }
+            if (slot == oal.SLOT_LEFT) { r = 3 }
+        } else {
+            if (slot == oal.SLOT_TOP) { r = 3 }
+            if (slot == oal.SLOT_RIGHT) { r = 1 }
+            if (slot == oal.SLOT_BOTTOM) { r = 0 }
+            if (slot == oal.SLOT_LEFT) { r = 2 }
+        }
+        if (pad_swapped() && r < 2) { r = 1 - r }
+        return r
+    }
+    vein pad_do(role: stone) -> void {
+        if (role == 0) {
+            if (oal.screen == S_PLAYER) { player.confirm() }
+            return
+        }
+        if (role == 1) {
+            voltar()
+            return
+        }
+        if (oal.screen != S_PLAYER) { return }
+        if (role == 2) { pausa() }
+        if (role == 3) { player.toggle_hide() }
+    }
+    vein pad(slot: stone) -> void { pad_do(pad_role(slot)) }
+    // Controle fisico/teclado: A/B/X/Y por papel, START/SELECT, setas e Enter/Espaco/Esc.
+    vein tecla() -> void {
+        forge c = oal.key_code
+        if (c >= 19 && c <= 22 && oal.screen == S_PLAYER) {
+            if (c == 19) { player.dpad(oal.DIR_UP) }
+            if (c == 20) { player.dpad(oal.DIR_DOWN) }
+            if (c == 21) { player.dpad(oal.DIR_LEFT) }
+            if (c == 22) { player.dpad(oal.DIR_RIGHT) }
+            return
+        }
+        if (c == 23 || c == 66 || c == 160 || c == 62) { pad_do(0) }
+        if (c == 96) { pad_do(pad_swap_role(0)) }
+        if (c == 97) { pad_do(pad_swap_role(1)) }
+        if (c == 111) { pad_do(1) }
+        if (c == 99 || c == 41 || c == 108) { pad_do(2) }
+        if (c == 100 || c == 36 || c == 109) { pad_do(3) }
+    }
+    // A fisico confirma e B cancela (trocados se o estilo estiver trocado)
+    vein pad_swap_role(r: stone) -> stone {
+        if (pad_swapped()) { return 1 - r }
+        return r
+    }
+    vein set_orient(v: stone) -> void {
+        cfg.orientation = v
+        cfg.save()
+        apply_orientation()
+        oal.refresh()
+    }
+    // botao de orientacao no player: auto -> retrato -> paisagem -> auto
+    vein cycle_orient() -> void {
+        set_orient((cfg.orientation + 1) % 3)
+        if (cfg.orientation == 0) { oal.toast(tr("orientacao") + ": " + tr("or_auto")) }
+        if (cfg.orientation == 1) { oal.toast(tr("orientacao") + ": " + tr("or_retrato")) }
+        if (cfg.orientation == 2) { oal.toast(tr("orientacao") + ": " + tr("or_paisagem")) }
+    }
+    vein orient_icon() -> obsidian {
+        if (cfg.orientation == 1) { return "portrait" }
+        if (cfg.orientation == 2) { return "landscape" }
+        return "rotate"
+    }
+    vein dpad_corner() -> stone {
+        if (cfg.dpad_side == 1) { return oal.BOTTOM_RIGHT }
+        return oal.BOTTOM_LEFT
+    }
+    // losango de botoes no canto oposto ao D-pad
+    vein diamond_corner() -> stone {
+        if (cfg.dpad_side == 1) { return oal.BOTTOM_LEFT }
+        return oal.BOTTOM_RIGHT
+    }
+    // confirmar fica empilhado com o D-pad (nao cobre as colunas)
+    vein ok_corner() -> stone { return dpad_corner() }
+    // paisagem sem gamepad: colunas laterais; com gamepad: fileira no topo
+    vein pad_style() -> stone { return cfg.pad_style }
+
+    vein storage_info() -> obsidian {
+        forge s = tr("pastas_app") + ":\n" + files + "\n  games/ saves/ patches/ import/ library.json"
+        forge fr = lib.free_bytes(files)
+        if (fr >= 0) { s = s + "\n" + lib.human_size(fr) + " " + tr("espaco_livre") }
+        return s
+    }
+    vein abrir_pasta_app() -> void {
+        arq.mode = 0
+        arq.open(files)
+        oal.go(S_ARQ)
+    }
+
+    // ── arquivos ─────────────────────────────────────────────────────────
+    vein abrir_arquivos() -> void {
+        if (!has_perm) {
+            oal.toast(tr("perm_nao"))
+            return
+        }
+        arq.mode = 0
+        arq.open("/storage/emulated/0/Download")
+        oal.go(S_ARQ)
+    }
+    vein arq_root(i: stone) -> void {
+        arq.open(arq.roots_path(i))
+        oal.scroll = 0
+        oal.refresh()
+    }
+    vein arq_root_is(i: stone) -> bool { return tx.eq(arq.cur, arq.roots_path(i)) }
+    vein arq_subir() -> void {
+        arq.up()
+        oal.scroll = 0
+        oal.refresh()
+    }
+    vein arq_abrir(i: stone) -> void {
+        if (arq.is_dir(i)) {
+            arq.open(arq.full(i))
+            oal.scroll = 0
+            oal.refresh()
+            return
+        }
+        if (arq.mode == 2 && tx.eq(lib.ext_of(arq.entries_nome(i)), "moonpack")) {
+            _plg_install_local(arq.full(i))
+            arq.mode = 0
+            oal.back()
+            return
+        }
+        if (arq.mode == 1 && tx.eq(lib.ext_of(arq.entries_nome(i)), "json")) {
+            if (patch_install_file(arq.full(i))) {
+                arq.mode = 0
+                oal.back()
+            }
+            return
+        }
+        oal.toast(arq.entries_nome(i) + " · " + arq.entries_info(i))
+    }
+    vein arq_pode_importar() -> bool { return arq.mode == 0 && tx.len(arq.here_engine) > 0 }
+    vein arq_importar() -> void {
+        imp.scan()
+        imp.start(arq.cur)
+        oal.replace(S_IMP)
+    }
+
+    // ── player ───────────────────────────────────────────────────────────
+    vein pausa() -> void {
+        oal.go(S_PAUSA)
+    }
+    vein voltar_jogo() -> void {
+        if (oal.screen != S_PLAYER) { oal.back() }
+        oal.refresh()
+    }
+    vein quick_load() -> void {
+        player.load_from(save.QUICK)
+    }
+    vein abrir_backlog() -> void {
+        oal.go(S_BACKLOG)
+        oal.scroll = 1000000000
+    }
+    vein sair_jogo() -> void {
+        if (player.can_save()) { player.save_to(save.QUICK) }
+        player.close()
+        apply_orientation()
+        oal.reset_to(S_BIB)
+        if (det >= 0) { oal.go(S_DET) }
+    }
+
+    // ── slots ────────────────────────────────────────────────────────────
+    vein abrir_slots(saving: bool) -> void {
+        player.saving = saving && player.active
+        _load_slots()
+        if (oal.screen == S_SLOTS) { oal.refresh() } else { oal.go(S_SLOTS) }
+    }
+    vein abrir_slots_save() -> void { abrir_slots(true) }
+    vein abrir_slots_load() -> void { abrir_slots(false) }
+    vein slots_modo(m: stone) -> void { abrir_slots(m == 1) }
+    vein slots_titulo() -> obsidian {
+        if (player.saving) { return tr("slots_salvar") }
+        return tr("slots_carregar")
+    }
+    vein _gid() -> obsidian {
+        if (player.active) { return player.game_id }
+        return _ds(lib.g_id)
+    }
+    vein _load_slots() -> void {
+        s_slot = []
+        s_nome = []
+        s_sub = []
+        s_img = []
+        forge gid = _gid()
+        forge l = save.slots()
+        forge i = 0
+        while (i < ofs_array_len(l)) {
+            forge sl: obsidian = ofs_array_get(l, i)
+            forge nm = tr("slot") + " " + tx.num(i)
+            if (i == 0) { nm = tr("slot_rapido") }
+            forge sub = tr("slot_vazio")
+            forge m = json.mark()
+            forge st = save.load_slot(gid, sl)
+            if (st >= 0) {
+                sub = tx.copy(json.gs(st, "saved_at", ""))
+                forge chp = tx.strip(json.gs(st, "chapter", ""))
+                if (tx.len(chp) > 0) { sub = sub + " · " + tx.copy(chp) }
+            }
+            json.release(m)
+            ofs_array_push(s_slot, sl)
+            ofs_array_push(s_nome, nm)
+            ofs_array_push(s_sub, sub)
+            ofs_array_push(s_img, save.thumbnail_path(gid, sl))
+            i++
+        }
+    }
+    vein slots_count() -> stone { return ofs_array_len(s_slot) }
+    vein slots_nome(i: stone) -> obsidian { return ofs_array_get(s_nome, i) }
+    vein slots_sub(i: stone) -> obsidian { return ofs_array_get(s_sub, i) }
+    vein slots_img(i: stone) -> obsidian { return ofs_array_get(s_img, i) }
+
+    vein slot_tocar(i: stone) -> void {
+        forge sl: obsidian = ofs_array_get(s_slot, i)
+        if (player.saving) {
+            if (player.save_to(sl)) {
+                oal.toast(tr("salvo"))
+                _load_slots()
+                oal.refresh()
+            }
+            return
+        }
+        if (player.active) {
+            if (player.load_from(sl)) {
+                oal.reset_to(S_BIB)
+                _to_player()
+            }
+            return
+        }
+        // carregar a partir dos detalhes: abre o jogo ja no save
+        player.ctrl = "novel"
+        if (tx.eq(_modo_lembrado(), "gamepad")) { player.ctrl = "gamepad" }
+        forge st = save.load_slot(_ds(lib.g_id), sl)
+        if (st < 0) {
+            oal.toast(tr("qload_nada"))
+            return
+        }
+        if (!player.open(det, st)) {
+            oal.toast(tr("erro_jogo"))
+            return
+        }
+        oal.reset_to(S_BIB)
+        _to_player()
+    }
+
+    vein _to_player() -> void {
+        if (det >= 0) { oal.go(S_DET) }
+        oal.go(S_PLAYER)
+    }
+
+    // ── busca ────────────────────────────────────────────────────────────
+    vein busca_show() -> obsidian { return lib.query + "|" }
+    vein busca_tecla(cp: stone) -> void {
+        if (cp == 10) {
+            oal.back()
+            return
+        }
+        lib.query = edit_key(cp, lib.query)
+        lib.update_view()
+        oal.refresh()
+    }
+}
+
+// chamadas pelo player
+vein app_open_slots(saving: bool) -> void { app.abrir_slots(saving) }
+vein app_exit_player() -> void { app.sair_jogo() }
+vein app_restore_orientation() -> void { app.apply_orientation() }

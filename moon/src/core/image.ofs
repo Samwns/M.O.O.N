@@ -1,0 +1,311 @@
+// M.O.O.N — imagens RGBA8 em memoria + escritor PNG.
+//
+// Uma imagem e um id; pixels ficam num buffer de w*h*4 bytes na ordem
+// R, G, B, A (igual ao Image.FORMAT_RGBA8 do Godot).
+//
+// O PNG e gravado com filtro Sub e deflate proprio (LZ77 com tabela hash +
+// Huffman fixo), legivel pelo png.ofs da stdlib e por qualquer visualizador.
+
+attach {F:bytes.ofs}
+
+namespace img {
+    forge _w: Array<stone> = []
+    forge _h: Array<stone> = []
+    forge _px: Array<stone> = []
+
+    vein new(w: stone, h: stone) -> stone {
+        ofs_array_push(_w, w)
+        ofs_array_push(_h, h)
+        ofs_array_push(_px, bx.alloc(w * h * 4))
+        return ofs_array_len(_w) - 1
+    }
+    vein w(id: stone) -> stone { return ofs_array_get(_w, id) }
+    vein h(id: stone) -> stone { return ofs_array_get(_h, id) }
+    vein px(id: stone) -> stone { return ofs_array_get(_px, id) }
+
+    vein free(id: stone) -> void {
+        if (id < 0) { return }
+        forge p: stone = ofs_array_get(_px, id)
+        bx.free(p)
+        ofs_array_set(_px, id, 0)
+    }
+
+    // Copia a regiao (x, y, cw, ch) para uma nova imagem.
+    vein crop(id: stone, x: stone, y: stone, cw: stone, ch: stone) -> stone {
+        forge n = new(cw, ch)
+        forge src = px(id)
+        forge dst = px(n)
+        forge iw = w(id)
+        forge yy = 0
+        while (yy < ch) {
+            bx.copy(dst + yy * cw * 4, src + ((y + yy) * iw + x) * 4, cw * 4)
+            yy++
+        }
+        return n
+    }
+
+    // ── PNG ──────────────────────────────────────────────────────────────
+    forge _crc: Array<stone> = []
+    forge _lbase: Array<stone> = []
+    forge _lext: Array<stone> = []
+    forge _dbase: Array<stone> = []
+    forge _dext: Array<stone> = []
+    forge _lcode: Array<stone> = []   // comprimento 3..258 -> indice do codigo
+    forge _bb: stone = 0
+    forge _bc: stone = 0
+    forge _out: stone = 0
+
+    vein _init() -> void {
+        if (ofs_array_len(_crc) > 0) { return }
+        forge n = 0
+        while (n < 256) {
+            forge c = n
+            forge k = 0
+            while (k < 8) {
+                if ((c & 1) != 0) { c = 3988292384 ^ (c >> 1) } else { c = c >> 1 }
+                k++
+            }
+            ofs_array_push(_crc, c)
+            n++
+        }
+        // tabelas de comprimento (RFC 1951 3.2.5)
+        forge i = 0
+        forge base = 3
+        while (i < 28) {
+            forge e = 0
+            if (i >= 8) { e = (i - 4) / 4 }
+            ofs_array_push(_lbase, base)
+            ofs_array_push(_lext, e)
+            base = base + (1 << e)
+            i++
+        }
+        ofs_array_push(_lbase, 258)
+        ofs_array_push(_lext, 0)
+        i = 0
+        base = 1
+        while (i < 30) {
+            forge e2 = 0
+            if (i >= 4) { e2 = (i - 2) / 2 }
+            ofs_array_push(_dbase, base)
+            ofs_array_push(_dext, e2)
+            base = base + (1 << e2)
+            i++
+        }
+        forge l = 0
+        while (l < 259) {
+            if (l < 3) {
+                ofs_array_push(_lcode, 0)
+            } else {
+                forge ci = 28
+                while (ci > 0 && ofs_array_get(_lbase, ci) > l) { ci-- }
+                ofs_array_push(_lcode, ci)
+            }
+            l++
+        }
+    }
+
+    vein _crc_of(p: stone, n: stone) -> stone {
+        forge c = 4294967295
+        forge i = 0
+        while (i < n) {
+            forge t: stone = ofs_array_get(_crc, (c ^ bx.gb(p, i)) & 255)
+            c = t ^ (c >> 8)
+            i++
+        }
+        return c ^ 4294967295
+    }
+
+    vein _bits(v: stone, n: stone) -> void {
+        _bb = _bb | (v << _bc)
+        _bc = _bc + n
+        while (_bc >= 8) {
+            sb.byte(_out, _bb & 255)
+            _bb = _bb >> 8
+            _bc = _bc - 8
+        }
+    }
+
+    // codigo Huffman (MSB primeiro) -> bits invertidos
+    vein _huff(code: stone, n: stone) -> void {
+        forge r = 0
+        forge i = 0
+        while (i < n) {
+            r = (r << 1) | ((code >> i) & 1)
+            i++
+        }
+        _bits(r, n)
+    }
+
+    vein _lit(v: stone) -> void {
+        if (v < 144) { _huff(48 + v, 8) }
+        else if (v < 256) { _huff(400 + v - 144, 9) }
+        else if (v < 280) { _huff(v - 256, 7) }
+        else { _huff(192 + v - 280, 8) }
+    }
+
+    vein _match(len: stone, dist: stone) -> void {
+        forge li: stone = ofs_array_get(_lcode, len)
+        _lit(257 + li)
+        forge le: stone = ofs_array_get(_lext, li)
+        if (le > 0) { _bits(len - ofs_array_get(_lbase, li), le) }
+        forge di = 29
+        while (di > 0 && ofs_array_get(_dbase, di) > dist) { di-- }
+        _huff(di, 5)
+        forge de: stone = ofs_array_get(_dext, di)
+        if (de > 0) { _bits(dist - ofs_array_get(_dbase, di), de) }
+    }
+
+    // zlib(data) com um unico bloco Huffman fixo.
+    vein _zlib(b: stone, data: stone, n: stone) -> void {
+        _out = b
+        _bb = 0
+        _bc = 0
+        sb.byte(b, 120)
+        sb.byte(b, 1)
+        _bits(1, 1)
+        _bits(1, 2)
+        forge hsize = 65536
+        forge head = bx.alloc(hsize * 8)
+        forge hb = head
+        forge k = 0
+        while (k < hsize) {
+            forge hp: *stone = fault_step(hb as *stone, k)
+            fracture { *hp = -1; }
+            k++
+        }
+        forge i = 0
+        while (i < n) {
+            forge best = 0
+            forge bdist = 0
+            if (i + 3 <= n) {
+                forge hv = ((bx.gb(data, i) << 10) ^ (bx.gb(data, i + 1) << 5) ^ bx.gb(data, i + 2)) & 65535
+                forge sp: *stone = fault_step(hb as *stone, hv)
+                forge cand = -1
+                fracture { cand = *sp; }
+                fracture { *sp = i; }
+                if (cand >= 0 && i - cand <= 32768) {
+                    forge maxl = n - i
+                    if (maxl > 258) { maxl = 258 }
+                    forge l = 0
+                    while (l < maxl && bx.gb(data, cand + l) == bx.gb(data, i + l)) { l++ }
+                    if (l >= 3) {
+                        best = l
+                        bdist = i - cand
+                    }
+                }
+            }
+            if (best >= 3) {
+                _match(best, bdist)
+                // registra as posicoes cobertas (poucas, para nao ficar lento)
+                forge j = 1
+                while (j < best && j < 8 && i + j + 3 <= n) {
+                    forge hv2 = ((bx.gb(data, i + j) << 10) ^ (bx.gb(data, i + j + 1) << 5) ^ bx.gb(data, i + j + 2)) & 65535
+                    forge sp2: *stone = fault_step(hb as *stone, hv2)
+                    forge pos = i + j
+                    fracture { *sp2 = pos; }
+                    j++
+                }
+                i = i + best
+            } else {
+                _lit(bx.gb(data, i))
+                i++
+            }
+        }
+        _lit(256)
+        if (_bc > 0) { _bits(0, 8 - _bc) }
+        bx.free(head)
+        // adler32
+        forge a = 1
+        forge bsum = 0
+        i = 0
+        while (i < n) {
+            a = (a + bx.gb(data, i)) % 65521
+            bsum = (bsum + a) % 65521
+            i++
+        }
+        sb.u32be(b, (bsum << 16) | a)
+    }
+
+    vein _chunk(b: stone, typ: obsidian, data: stone, n: stone) -> void {
+        sb.u32be(b, n)
+        forge st = sb.len(b)
+        sb.add(b, typ)
+        sb.bytes(b, data, n)
+        forge c = _crc_of(sb.ptr(b) + st, n + 4)
+        sb.u32be(b, c)
+    }
+
+    // alpha=false grava RGB (cor 2); alpha=true grava RGBA (cor 6).
+    vein save_png(id: stone, path: obsidian, alpha: bool) -> bool {
+        _init()
+        forge iw = w(id)
+        forge ih = h(id)
+        forge src = px(id)
+        forge ch = 3
+        if (alpha) { ch = 4 }
+        forge stride = iw * ch
+        forge raw = bx.alloc((stride + 1) * ih)
+        forge y = 0
+        while (y < ih) {
+            forge ro = y * (stride + 1)
+            bx.pb(raw, ro, 1)
+            forge x = 0
+            forge pr = 0
+            forge pg = 0
+            forge pbv = 0
+            forge pa = 0
+            while (x < iw) {
+                forge so = (y * iw + x) * 4
+                forge r = bx.gb(src, so)
+                forge g = bx.gb(src, so + 1)
+                forge bl = bx.gb(src, so + 2)
+                forge o = ro + 1 + x * ch
+                bx.pb(raw, o, r - pr)
+                bx.pb(raw, o + 1, g - pg)
+                bx.pb(raw, o + 2, bl - pbv)
+                if (alpha) {
+                    forge al = bx.gb(src, so + 3)
+                    bx.pb(raw, o + 3, al - pa)
+                    pa = al
+                }
+                pr = r
+                pg = g
+                pbv = bl
+                x++
+            }
+            y++
+        }
+        forge z = sb.new()
+        _zlib(z, raw, (stride + 1) * ih)
+        bx.free(raw)
+        forge b = sb.new()
+        sb.byte(b, 137)
+        sb.add(b, "PNG")
+        sb.byte(b, 13)
+        sb.byte(b, 10)
+        sb.byte(b, 26)
+        sb.byte(b, 10)
+        forge hdr = bx.alloc(13)
+        bx.pb(hdr, 0, iw >> 24)
+        bx.pb(hdr, 1, iw >> 16)
+        bx.pb(hdr, 2, iw >> 8)
+        bx.pb(hdr, 3, iw)
+        bx.pb(hdr, 4, ih >> 24)
+        bx.pb(hdr, 5, ih >> 16)
+        bx.pb(hdr, 6, ih >> 8)
+        bx.pb(hdr, 7, ih)
+        bx.pb(hdr, 8, 8)
+        if (alpha) { bx.pb(hdr, 9, 6) } else { bx.pb(hdr, 9, 2) }
+        bx.pb(hdr, 10, 0)
+        bx.pb(hdr, 11, 0)
+        bx.pb(hdr, 12, 0)
+        _chunk(b, "IHDR", hdr, 13)
+        bx.free(hdr)
+        _chunk(b, "IDAT", sb.ptr(z), sb.len(z))
+        _chunk(b, "IEND", 0, 0)
+        forge ok = sb.write(b, path)
+        sb.drop(z)
+        sb.drop(b)
+        return ok
+    }
+}

@@ -1,0 +1,165 @@
+// M.O.O.N — slots de save (porta de batch/vn_player_godot/src/core/SaveManager.gd).
+//
+// Arquivos: <root>/<game>/<slot>.json (+ <slot>.png miniatura 240x180).
+// O estado e o snapshot da VM (script, addr, call_stack, vars, flags, scene)
+// mais extras da UI; o JSON e o mesmo do Godot (compacto, chaves extras
+// "slot", "saved_at" "AAAA-MM-DD HH:MM:SS" e "unix").
+//
+// <root> vem do chamador (no Godot era user://saves): o nucleo nao conhece
+// caminhos de plataforma.
+
+attach {F:bytes.ofs}
+attach {F:json.ofs}
+attach {F:image.ofs}
+
+extern vein time(t: *stone) -> stone
+extern vein localtime_r(t: *stone, tm: *stone) -> *stone
+
+namespace save {
+    forge SLOT_COUNT: stone = 12
+    forge QUICK: obsidian = "quick"
+    forge root: obsidian = "saves"
+
+    vein set_root(dir: obsidian) -> void {
+        root = dir
+    }
+
+    vein _dir(game_id: obsidian) -> obsidian {
+        return root + "/" + game_id
+    }
+
+    vein _two(v: stone) -> obsidian {
+        if (v < 10) { return "0" + tx.num(v) }
+        return tx.num(v)
+    }
+
+    vein now_unix() -> stone {
+        forge tb = bx.alloc(16)
+        time(tb as *stone)
+        forge t = bx.u32(tb, 0) | (bx.u32(tb, 4) << 32)
+        bx.free(tb)
+        return t
+    }
+
+    // Time.get_datetime_string_from_system(false, true): "AAAA-MM-DD HH:MM:SS"
+    vein now_string() -> obsidian {
+        forge tb = bx.alloc(16)
+        forge tm_b = bx.alloc(128)
+        time(tb as *stone)
+        localtime_r(tb as *stone, tm_b as *stone)
+        forge s = tx.num(bx.i32(tm_b, 20) + 1900) + "-" + _two(bx.i32(tm_b, 16) + 1) + "-" + _two(bx.i32(tm_b, 12))
+        s = s + " " + _two(bx.i32(tm_b, 8)) + ":" + _two(bx.i32(tm_b, 4)) + ":" + _two(bx.i32(tm_b, 0))
+        bx.free(tb)
+        bx.free(tm_b)
+        return s
+    }
+
+    // Reduz a imagem para 240x180 (bilinear simples) e grava PNG.
+    vein _thumb(id: stone, path: obsidian) -> void {
+        forge tw = 240
+        forge th = 180
+        forge t = img.new(tw, th)
+        forge sw = img.w(id)
+        forge shh = img.h(id)
+        forge sp = img.px(id)
+        forge dp = img.px(t)
+        forge y = 0
+        while (y < th) {
+            forge fy = (y * 2 + 1) * shh * 128 / th - 128
+            if (fy < 0) { fy = 0 }
+            forge y0 = fy / 256
+            forge wy = fy % 256
+            forge y1 = y0 + 1
+            if (y1 >= shh) { y1 = shh - 1 }
+            forge x = 0
+            while (x < tw) {
+                forge fx = (x * 2 + 1) * sw * 128 / tw - 128
+                if (fx < 0) { fx = 0 }
+                forge x0 = fx / 256
+                forge wx = fx % 256
+                forge x1 = x0 + 1
+                if (x1 >= sw) { x1 = sw - 1 }
+                forge c = 0
+                while (c < 4) {
+                    forge a = bx.gb(sp, (y0 * sw + x0) * 4 + c)
+                    forge b = bx.gb(sp, (y0 * sw + x1) * 4 + c)
+                    forge cc = bx.gb(sp, (y1 * sw + x0) * 4 + c)
+                    forge d = bx.gb(sp, (y1 * sw + x1) * 4 + c)
+                    forge top = a * (256 - wx) + b * wx
+                    forge bot = cc * (256 - wx) + d * wx
+                    bx.pb(dp, (y * tw + x) * 4 + c, (top * (256 - wy) + bot * wy) / 65536)
+                    c++
+                }
+                x++
+            }
+            y++
+        }
+        img.save_png(t, path, false)
+        img.free(t)
+    }
+
+    // thumbnail: id de imagem RGBA (img.*) ou -1.
+    vein save_slot(game_id: obsidian, slot: obsidian, state: stone, thumbnail: stone) -> bool {
+        forge d = _dir(game_id)
+        bx.mkdir_p(d)
+        forge s = json.clone(state)
+        json.put_s(s, "slot", slot)
+        json.put_s(s, "saved_at", now_string())
+        json.put(s, "unix", json.float_raw(tx.num(now_unix()) + ".0", now_unix()))
+        forge ok = json.save(d + "/" + slot + ".json", s, "")
+        if (thumbnail >= 0) { _thumb(thumbnail, d + "/" + slot + ".png") }
+        return ok
+    }
+
+    // Devolve o objeto salvo ou -1.
+    vein load_slot(game_id: obsidian, slot: obsidian) -> stone {
+        forge p = _dir(game_id) + "/" + slot + ".json"
+        if (!bx.exists(p)) { return -1 }
+        forge v = json.load(p)
+        if (!json.is_obj(v)) { return -1 }
+        return v
+    }
+
+    vein thumbnail_path(game_id: obsidian, slot: obsidian) -> obsidian {
+        forge p = _dir(game_id) + "/" + slot + ".png"
+        if (!bx.exists(p)) { return "" }
+        return p
+    }
+
+    vein slots() -> Array<obsidian> {
+        forge out: Array<obsidian> = []
+        ofs_array_push(out, QUICK)
+        forge i = 0
+        while (i < SLOT_COUNT) {
+            ofs_array_push(out, "slot" + _two(i + 1))
+            i++
+        }
+        return out
+    }
+
+    // Save mais recente (maior "unix") ou -1.
+    vein latest(game_id: obsidian) -> stone {
+        forge best = -1
+        forge best_t = -1
+        forge l = slots()
+        forge i = 0
+        while (i < ofs_array_len(l)) {
+            forge s: obsidian = ofs_array_get(l, i)
+            forge st = load_slot(game_id, s)
+            if (st >= 0) {
+                forge t = json.gi(st, "unix", 0)
+                if (t > best_t) {
+                    best = st
+                    best_t = t
+                }
+            }
+            i++
+        }
+        return best
+    }
+
+    vein delete_slot(game_id: obsidian, slot: obsidian) -> void {
+        bx.delete(_dir(game_id) + "/" + slot + ".json")
+        bx.delete(_dir(game_id) + "/" + slot + ".png")
+    }
+}

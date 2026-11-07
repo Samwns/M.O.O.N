@@ -1,0 +1,805 @@
+// M.O.O.N — biblioteca (files/library.json), deteccao de motor (MOON.md 7.2)
+// e identificacao do jogo pela pasta (nome, versao, empresa, executavel, capa).
+
+attach {F:cfg.ofs}
+attach {F:../drivers/godot_detect.ofs}
+attach {F:../drivers/arte_auto.ofs}
+
+extern vein stat(path: obsidian, buf: *stone) -> stone
+extern vein statfs(path: obsidian, buf: *stone) -> stone
+
+namespace lib {
+    forge path: obsidian = ""            // library.json
+    forge root: obsidian = ""            // .../files
+
+    // jogos
+    forge g_id: Array<obsidian> = []
+    forge g_name: Array<obsidian> = []
+    forge g_engine: Array<obsidian> = []
+    forge g_engver: Array<obsidian> = []
+    forge g_ver: Array<obsidian> = []
+    forge g_src: Array<obsidian> = []
+    forge g_data: Array<obsidian> = []
+    forge g_cover: Array<obsidian> = []
+    forge g_icon: Array<obsidian> = []    // icone do jogo extraido ("-" = procurado, sem icone)
+    forge g_size: Array<stone> = []
+    forge g_company: Array<obsidian> = []
+    forge g_exe: Array<obsidian> = []
+    forge g_added: Array<obsidian> = []
+    forge g_desc: Array<obsidian> = []    // descricao editada pelo usuario (detalhes)
+    forge g_mode: Array<obsidian> = []    // modo de controle lembrado: "" (perguntar), "novel" ou "gamepad"
+    forge motores_patch: Array<obsidian> = []  // motores de .moonpack com "patches": true (plugins.ofs preenche no scan)
+    // capacidade de patches de traducao por motor: MOON. sempre; outros via plugin.json "patches": true
+    vein motor_suporta_patches(e: obsidian) -> bool {
+        if (tx.eq(e, "tactics_moon")) { return true }
+        forge k = 0
+        while (k < ofs_array_len(motores_patch)) {
+            if (tx.eq(ofs_array_get(motores_patch, k), e)) { return true }
+            k++
+        }
+        return false
+    }
+
+    // 0 sem plugin, 1 plugin instalado (webview, pronto), 2 instalado mas o motor ainda nao roda aqui;
+    // paralelo a g_*; preenchido por plg.refresh_status()
+    forge p_ok: Array<stone> = []
+
+    forge query: obsidian = ""
+    forge view: Array<stone> = []        // indices visiveis (busca), por nome
+
+    // ── utilidades de arquivo ────────────────────────────────────────────
+    forge _st: *stone = null
+    vein file_size(p: obsidian) -> stone {
+        if (_st == null) { _st = ofs_alloc(256) }
+        if (stat(p, _st) != 0) { return 0 }
+        return android.peek(_st, 6)          // st_size em +48 (aarch64 e x86-64)
+    }
+
+    // bytes livres no armazenamento (statfs: f_bsize +8, f_bavail +32 no aarch64)
+    vein free_bytes(p: obsidian) -> stone {
+        if (_st == null) { _st = ofs_alloc(256) }
+        if (statfs(p, _st) != 0) { return -1 }
+        return android.peek(_st, 1) * android.peek(_st, 4)
+    }
+
+    vein human_size(b: stone) -> obsidian {
+        if (b < 0) { return "?" }
+        if (b < 1024) { return tx.num(b) + " B" }
+        if (b < 1048576) { return tx.num(b / 1024) + " KB" }
+        if (b < 1073741824) { return tx.num(b / 1048576) + " MB" }
+        forge g10 = (b * 10) / 1073741824
+        return tx.num(g10 / 10) + "," + tx.num(g10 % 10) + " GB"
+    }
+
+    vein ext_of(name: obsidian) -> obsidian { return tx.lower(tx.extension(name)) }
+
+    vein _has_ext(dir: obsidian, ext: obsidian) -> obsidian {
+        forge fs = bx.list_dir(dir, 1)
+        forge i = 0
+        while (i < ofs_array_len(fs)) {
+            forge f: obsidian = ofs_array_get(fs, i)
+            if (tx.eq(ext_of(f), ext)) { return f }
+            i++
+        }
+        return ""
+    }
+
+    // ── deteccao ─────────────────────────────────────────────────────────
+    forge d_engine: obsidian = ""
+    forge d_engver: obsidian = ""
+    forge d_name: obsidian = ""
+    forge d_ver: obsidian = ""
+    forge d_company: obsidian = ""
+    forge d_exe: obsidian = ""
+    forge d_cover: obsidian = ""
+
+    // "WGW-0.1.5-pc" -> nome "WGW", versao "0.1.5"; "GOMI_0_4" -> "GOMI", "0.4"
+    vein _split_name(folder: obsidian) -> void {
+        forge n = tx.len(folder)
+        forge i = 1
+        forge cut = -1
+        while (i < n - 1) {
+            forge c = tx.at(folder, i)
+            forge d = tx.at(folder, i + 1)
+            if ((c == 45 || c == 95 || c == 32) && d >= 48 && d <= 57) {
+                cut = i
+                break
+            }
+            i++
+        }
+        if (cut < 0) {
+            d_name = folder
+            d_ver = ""
+            return
+        }
+        d_name = tx.sub(folder, 0, cut)
+        forge rest = tx.sub(folder, cut + 1, n - cut - 1)
+        // versao: digitos e separadores ate a primeira letra
+        forge v = ""
+        forge k = 0
+        while (k < tx.len(rest)) {
+            forge c2 = tx.at(rest, k)
+            if (c2 >= 48 && c2 <= 57) {
+                v = v + tx.sub(rest, k, 1)
+            } else if (c2 == 46 || c2 == 95 || c2 == 45) {
+                if (k + 1 < tx.len(rest) && tx.at(rest, k + 1) >= 48 && tx.at(rest, k + 1) <= 57) { v = v + "." } else { break }
+            } else {
+                break
+            }
+            k++
+        }
+        d_ver = v
+    }
+
+    // valor entre aspas depois de `chave` numa linha de .rpy ("define config.name = _("X")")
+    vein _rpy_value(text: obsidian, key: obsidian) -> obsidian {
+        forge n = tx.len(text)
+        forge kl = tx.len(key)
+        forge i = 0
+        while (i + kl < n) {
+            if (tx.at(text, i) == tx.at(key, 0) && tx.eq(tx.sub(text, i, kl), key)) {
+                forge j = i + kl
+                while (j < n && tx.at(text, j) != 34 && tx.at(text, j) != 10) { j++ }
+                if (j < n && tx.at(text, j) == 34) {
+                    forge e = j + 1
+                    while (e < n && tx.at(text, e) != 34 && tx.at(text, e) != 10) { e++ }
+                    return tx.sub(text, j + 1, e - j - 1)
+                }
+            }
+            i++
+        }
+        return ""
+    }
+
+    vein _renpy_version(dir: obsidian) -> obsidian {
+        // game/script_version.txt: "(8, 4, 1)"
+        forge t = bx.read_text(dir + "/game/script_version.txt")
+        if (tx.len(t) == 0) { return "" }
+        forge out = ""
+        forge i = 0
+        while (i < tx.len(t)) {
+            forge c = tx.at(t, i)
+            if (c >= 48 && c <= 57) { out = out + tx.sub(t, i, 1) }
+            if (c == 44 && tx.len(out) > 0) { out = out + "." }
+            i++
+        }
+        return out
+    }
+
+    vein _game_has_scripts(gdir: obsidian) -> bool {
+        if (tx.len(_has_ext(gdir, "rpa")) > 0) { return true }
+        if (tx.len(_has_ext(gdir, "rpy")) > 0) { return true }
+        if (tx.len(_has_ext(gdir, "rpyc")) > 0) { return true }
+        return false
+    }
+
+    // Identifica o motor e os dados do jogo na pasta. Devolve o id do motor
+    // ("tactics_moon", "renpy", "unity", "windows") ou "".
+    vein detect(dir: obsidian) -> obsidian {
+        d_engine = ""
+        d_engver = ""
+        d_company = ""
+        d_exe = ""
+        d_cover = ""
+        _split_name(tx.file_name(dir))
+        d_exe = _has_ext(dir, "exe")
+        if (bx.exists(dir + "/moon_eng.lst") && bx.exists(dir + "/moon_eng")) {
+            d_engine = "tactics_moon"
+            d_name = "MOON."
+            d_engver = "Tactics 1997"
+            d_company = "Tactics / Nexton"
+            d_ver = "EN"
+            if (bx.exists(dir + "/moon_jp.lst")) { d_ver = "EN + JP" }
+            if (bx.exists(dir + "/MOON_eng.EXE")) { d_exe = "MOON_eng.EXE" }
+            return d_engine
+        }
+        if (bx.is_dir(dir + "/renpy") && bx.is_dir(dir + "/game") && _game_has_scripts(dir + "/game")) {
+            d_engine = "renpy"
+            d_engver = _renpy_version(dir)
+            forge opt = bx.read_text(dir + "/game/options.rpy")
+            if (tx.len(opt) > 0) {
+                forge nm = _rpy_value(opt, "config.name")
+                if (tx.len(nm) > 0) { d_name = nm }
+                forge vv = _rpy_value(opt, "config.version")
+                if (tx.len(vv) > 0) { d_ver = vv }
+            }
+            if (bx.exists(dir + "/game/gui/window_icon.png")) { d_cover = dir + "/game/gui/window_icon.png" }
+            return d_engine
+        }
+        if (_detect_html5(dir)) { return d_engine }
+        forge pck = arte.escolher_pck(dir)
+        if (tx.len(pck) > 0) {
+            forge gv = gd.version(dir + "/" + pck)
+            if (tx.len(gv) > 0) {
+                d_engine = "godot"
+                d_engver = gv
+                if (arte.godot_info(dir + "/" + pck)) {
+                    if (tx.len(arte.nome) > 0) { d_name = arte.nome }
+                    if (tx.len(arte.versao) > 0) { d_ver = arte.versao }
+                }
+                return d_engine
+            }
+        }
+        forge subs = bx.list_dir(dir, 2)
+        forge i = 0
+        while (i < ofs_array_len(subs)) {
+            forge sd: obsidian = ofs_array_get(subs, i)
+            if (tx.ends(sd, "_Data") && bx.exists(dir + "/" + sd + "/globalgamemanagers")) {
+                d_engine = "unity"
+                // app.info: "Empresa\nProduto"
+                forge info = bx.read_text(dir + "/" + sd + "/app.info")
+                if (tx.len(info) > 0) {
+                    forge nl = tx.find(info, 10, 0)
+                    if (nl > 0) {
+                        d_company = tx.strip(tx.sub(info, 0, nl))
+                        forge prod = tx.strip(tx.sub(info, nl + 1, tx.len(info) - nl - 1))
+                        if (tx.len(prod) > 0) { d_name = prod }
+                    }
+                }
+                forge pv = _unity_version(dir + "/" + sd + "/globalgamemanagers")
+                if (tx.len(pv) > 0) { d_engver = pv }
+                return d_engine
+            }
+            i++
+        }
+        if (tx.len(d_exe) > 0) {
+            d_engine = "windows"
+            if (tx.len(d_name) == 0) { d_name = tx.basename(d_exe) }
+            return d_engine
+        }
+        return ""
+    }
+
+    // primeiro valor entre aspas depois de `key` num trecho de JS ("Utils.RPGMAKER_VERSION = \"1.6.2\"")
+    vein _js_value(text: obsidian, key: obsidian) -> obsidian {
+        forge n = tx.len(text)
+        forge m = tx.len(key)
+        forge i = 0
+        while (i + m < n) {
+            i = tx.find(text, tx.at(key, 0), i)
+            if (i < 0) { return "" }
+            if (tx.eq(tx.sub(text, i, m), key)) {
+                forge j = i + m
+                while (j < n && tx.at(text, j) != 34 && tx.at(text, j) != 39 && tx.at(text, j) != 10) { j++ }
+                if (j < n && tx.at(text, j) != 10) {
+                    forge q = tx.at(text, j)
+                    forge e = tx.find(text, q, j + 1)
+                    if (e > j && e - j < 24) { return tx.sub(text, j + 1, e - j - 1) }
+                }
+            }
+            i++
+        }
+        return ""
+    }
+
+    // RPG Maker MV/MZ e TyranoBuilder (jogos HTML5)
+    vein _detect_html5(dir: obsidian) -> bool {
+        forge corejs = ""
+        forge mvz = ""
+        if (bx.exists(dir + "/js/rmmz_core.js")) {
+            corejs = dir + "/js/rmmz_core.js"
+            mvz = "mz"
+        } else if (bx.exists(dir + "/www/js/rpg_core.js")) {
+            corejs = dir + "/www/js/rpg_core.js"
+            mvz = "mv"
+        } else if (bx.exists(dir + "/js/rpg_core.js")) {
+            corejs = dir + "/js/rpg_core.js"
+            mvz = "mv"
+        }
+        if (tx.len(corejs) > 0) {
+            forge hbuf = bx.read_at(corejs, 0, 98304)
+            forge v = ""
+            if (hbuf != 0) {
+                v = _js_value(tx.from_bytes(hbuf, bx.last_len), "RPGMAKER_VERSION")
+                bx.free(hbuf)
+            }
+            d_engine = "rpgm"
+            if (tx.len(v) == 0) { v = "0" }
+            d_engver = mvz + "-" + v
+            return true
+        }
+        forge is_t = bx.is_dir(dir + "/tyrano") && bx.is_dir(dir + "/data/scenario")
+        if (!is_t && bx.exists(dir + "/index.html")) {
+            forge hb = bx.read_at(dir + "/index.html", 0, 65536)
+            if (hb != 0) {
+                is_t = _contains(tx.from_bytes(hb, bx.last_len), "tyrano")
+                bx.free(hb)
+            }
+        }
+        if (is_t) {
+            d_engine = "tyrano"
+            forge tv = ""
+            forge kag = dir + "/tyrano/plugins/kag/kag.js"
+            if (!bx.exists(kag)) { kag = dir + "/tyrano/tyrano.js" }
+            forge kb = bx.read_at(kag, 0, 65536)
+            if (kb != 0) {
+                tv = _js_value(tx.from_bytes(kb, bx.last_len), "version")
+                bx.free(kb)
+            }
+            if (tx.len(tv) == 0) { tv = "5" }
+            d_engver = tv
+            return true
+        }
+        return false
+    }
+
+    // versao do Unity no cabecalho do globalgamemanagers ("2022.3.10f1")
+    vein _unity_version(p: obsidian) -> obsidian {
+        forge b = bx.read_at(p, 0, 64)
+        if (b == 0) { return "" }
+        forge n = bx.last_len
+        forge i = 0
+        while (i + 4 < n) {
+            forge c = bx.gb(b, i)
+            if (c >= 49 && c <= 57 && bx.gb(b, i + 4) == 46) {
+                forge e = i
+                while (e < n && bx.gb(b, e) != 0) { e++ }
+                forge s = tx.from_bytes(b + i, e - i)
+                bx.free(b)
+                return s
+            }
+            i++
+        }
+        bx.free(b)
+        return ""
+    }
+
+    vein engine_label(e: obsidian, ver: obsidian) -> obsidian {
+        forge v = ""
+        if (tx.len(ver) > 0) { v = " " + ver }
+        if (tx.eq(e, "tactics_moon")) { return "MOON. (tactics_moon)" }
+        if (tx.eq(e, "renpy")) { return "Ren'Py" + v }
+        if (tx.eq(e, "unity")) { return "Unity" + v }
+        if (tx.eq(e, "godot")) { return "Godot" + v }
+        if (tx.eq(e, "tyrano")) { return "TyranoBuilder" + v }
+        if (tx.eq(e, "rpgm")) {
+            forge dash = tx.find(ver, 45, 0)
+            if (dash > 0) { return "RPG Maker " + tx.upper(tx.sub(ver, 0, dash)) + " " + tx.sub(ver, dash + 1, tx.len(ver) - dash - 1) }
+            return "RPG Maker" + v
+        }
+        if (tx.eq(e, "windows")) { return tr("motor_windows") }
+        return tr("motor_desconhecido")
+    }
+
+    vein engine_badge(e: obsidian) -> obsidian {
+        if (tx.eq(e, "tactics_moon")) { return "MOON." }
+        if (tx.eq(e, "renpy")) { return "Ren'Py" }
+        if (tx.eq(e, "unity")) { return "Unity" }
+        if (tx.eq(e, "godot")) { return "Godot" }
+        if (tx.eq(e, "rpgm")) { return "RPGM" }
+        if (tx.eq(e, "tyrano")) { return "Tyrano" }
+        if (tx.eq(e, "windows")) { return "EXE" }
+        return "?"
+    }
+
+    vein engine_icon(e: obsidian) -> obsidian {
+        if (tx.eq(e, "tactics_moon")) { return "moon" }
+        if (tx.eq(e, "renpy")) { return "renpy" }
+        if (tx.eq(e, "unity")) { return "unity" }
+        if (tx.eq(e, "rpgm")) { return "rpgm" }
+        if (tx.eq(e, "tyrano")) { return "tyrano" }
+        if (tx.eq(e, "godot")) { return "plugins" }
+        if (tx.eq(e, "windows")) { return "windows" }
+        return "unknown"
+    }
+
+    // motores que rodam por plugin baixado (.moonpack)
+    vein is_plugin_engine(e: obsidian) -> bool {
+        return tx.eq(e, "renpy") || tx.eq(e, "godot") || tx.eq(e, "rpgm") || tx.eq(e, "tyrano")
+    }
+
+    // 0 pronto, 1 precisa de plugin, 2 nao suportado, 3 pasta sumiu, 4 plugin instalado (motor ainda nao roda)
+    vein status_of(i: stone) -> stone {
+        forge e: obsidian = ofs_array_get(g_engine, i)
+        if (tx.eq(e, "tactics_moon")) {
+            forge dd: obsidian = ofs_array_get(g_data, i)
+            if (tx.len(dd) == 0 || !bx.exists(dd + "/game.json")) { return 3 }
+            return 0
+        }
+        if (is_plugin_engine(e)) {
+            forge pk = 0
+            if (i < ofs_array_len(p_ok)) { pk = ofs_array_get(p_ok, i) }
+            if (pk == 1) { return 0 }
+            if (pk == 2) { return 4 }
+            if (!bx.is_dir(ofs_array_get(g_src, i))) { return 3 }
+            return 1
+        }
+        return 2
+    }
+
+    vein status_text(i: stone) -> obsidian {
+        forge st = status_of(i)
+        if (st == 0) { return tr("st_pronto") }
+        if (st == 1) { return tr("st_plugin") }
+        if (st == 3) { return tr("st_falta") }
+        if (st == 4) { return tr("st_instalado") }
+        return tr("st_nao")
+    }
+
+    // ── persistencia ─────────────────────────────────────────────────────
+    vein load(p: obsidian, files_root: obsidian) -> void {
+        path = p
+        root = files_root
+        g_id = []
+        g_name = []
+        g_engine = []
+        g_engver = []
+        g_ver = []
+        g_src = []
+        g_data = []
+        g_cover = []
+        g_icon = []
+        g_size = []
+        g_company = []
+        g_exe = []
+        g_added = []
+        g_desc = []
+        g_mode = []
+        forge m = json.mark()
+        forge o = json.load(p)
+        forge c = json.first(json.get(o, "games"))
+        while (c >= 0) {
+            ofs_array_push(g_id, tx.copy(json.gs(c, "id", "")))
+            ofs_array_push(g_name, tx.copy(json.gs(c, "name", "")))
+            ofs_array_push(g_engine, tx.copy(json.gs(c, "engine", "")))
+            ofs_array_push(g_engver, tx.copy(json.gs(c, "engine_version", "")))
+            ofs_array_push(g_ver, tx.copy(json.gs(c, "version", "")))
+            ofs_array_push(g_src, tx.copy(json.gs(c, "path", "")))
+            ofs_array_push(g_data, tx.copy(json.gs(c, "data", "")))
+            ofs_array_push(g_cover, tx.copy(json.gs(c, "cover", "")))
+            ofs_array_push(g_icon, tx.copy(json.gs(c, "icon", "")))
+            ofs_array_push(g_size, json.gi(c, "size", 0))
+            ofs_array_push(g_company, tx.copy(json.gs(c, "company", "")))
+            ofs_array_push(g_exe, tx.copy(json.gs(c, "exe", "")))
+            ofs_array_push(g_added, tx.copy(json.gs(c, "added_at", "")))
+            ofs_array_push(g_desc, tx.copy(json.gs(c, "desc", "")))
+            ofs_array_push(g_mode, tx.copy(json.gs(c, "control_mode", "")))
+            c = json.next(c)
+        }
+        json.release(m)
+        update_view()
+    }
+
+    vein save() -> void {
+        forge m = json.mark()
+        forge o = json.obj()
+        json.put_i(o, "version", 1)
+        forge a = json.arr()
+        forge i = 0
+        while (i < count()) {
+            forge e = json.obj()
+            json.put_s(e, "id", ofs_array_get(g_id, i))
+            json.put_s(e, "name", ofs_array_get(g_name, i))
+            json.put_s(e, "engine", ofs_array_get(g_engine, i))
+            json.put_s(e, "engine_version", ofs_array_get(g_engver, i))
+            json.put_s(e, "version", ofs_array_get(g_ver, i))
+            json.put_s(e, "path", ofs_array_get(g_src, i))
+            json.put_s(e, "data", ofs_array_get(g_data, i))
+            json.put_s(e, "cover", ofs_array_get(g_cover, i))
+            json.put_s(e, "icon", ofs_array_get(g_icon, i))
+            json.put_i(e, "size", ofs_array_get(g_size, i))
+            json.put_s(e, "company", ofs_array_get(g_company, i))
+            json.put_s(e, "exe", ofs_array_get(g_exe, i))
+            json.put_s(e, "added_at", ofs_array_get(g_added, i))
+            json.put_s(e, "desc", ofs_array_get(g_desc, i))
+            json.put_s(e, "control_mode", ofs_array_get(g_mode, i))
+            json.push(a, e)
+            i++
+        }
+        json.put(o, "games", a)
+        json.save(path, o, "  ")
+        json.release(m)
+    }
+
+    vein count() -> stone { return ofs_array_len(g_id) }
+
+    vein find_src(src: obsidian) -> stone {
+        forge i = 0
+        while (i < count()) {
+            forge s: obsidian = ofs_array_get(g_src, i)
+            if (tx.eq(s, src)) { return i }
+            i++
+        }
+        return -1
+    }
+
+    vein find_id(id: obsidian) -> stone {
+        forge i = 0
+        while (i < count()) {
+            forge s: obsidian = ofs_array_get(g_id, i)
+            if (tx.eq(s, id)) { return i }
+            i++
+        }
+        return -1
+    }
+
+    // id unico a partir do nome ("moon" fica reservado ao MOON.: os saves e
+    // patches do Godot usam esse id)
+    vein new_id(engine: obsidian, name: obsidian) -> obsidian {
+        if (tx.eq(engine, "tactics_moon")) { return "moon" }
+        forge base = ""
+        forge l = tx.lower(name)
+        forge i = 0
+        while (i < tx.len(l)) {
+            forge c = tx.at(l, i)
+            if ((c >= 97 && c <= 122) || (c >= 48 && c <= 57)) { base = base + tx.sub(l, i, 1) } else if (tx.len(base) > 0 && tx.at(base, tx.len(base) - 1) != 95) { base = base + "_" }
+            i++
+        }
+        if (tx.len(base) == 0) { base = "jogo" }
+        forge id = base
+        forge k = 2
+        while (find_id(id) >= 0) {
+            id = base + "_" + tx.num(k)
+            k++
+        }
+        return id
+    }
+
+    // Adiciona (ou atualiza, se a pasta ja estiver) com os dados de detect().
+    vein add_detected(src: obsidian, data_dir: obsidian, size: stone, stamp: obsidian) -> stone {
+        forge i = find_src(src)
+        if (i < 0 && tx.eq(d_engine, "tactics_moon")) { i = find_id("moon") }
+        if (i < 0) {
+            ofs_array_push(g_id, new_id(d_engine, d_name))
+            ofs_array_push(g_name, d_name)
+            ofs_array_push(g_engine, d_engine)
+            ofs_array_push(g_engver, d_engver)
+            ofs_array_push(g_ver, d_ver)
+            ofs_array_push(g_src, src)
+            ofs_array_push(g_data, data_dir)
+            ofs_array_push(g_cover, d_cover)
+            ofs_array_push(g_icon, "")
+            ofs_array_push(g_size, size)
+            ofs_array_push(g_company, d_company)
+            ofs_array_push(g_exe, d_exe)
+            ofs_array_push(g_added, stamp)
+            ofs_array_push(g_desc, "")
+            ofs_array_push(g_mode, "")
+            i = count() - 1
+        } else {
+            ofs_array_set(g_engine, i, d_engine)
+            ofs_array_set(g_engver, i, d_engver)
+            ofs_array_set(g_ver, i, d_ver)
+            ofs_array_set(g_src, i, src)
+            ofs_array_set(g_data, i, data_dir)
+            ofs_array_set(g_size, i, size)
+            ofs_array_set(g_company, i, d_company)
+            ofs_array_set(g_exe, i, d_exe)
+            forge cv: obsidian = ofs_array_get(g_cover, i)
+            if (tx.len(cv) == 0) { ofs_array_set(g_cover, i, d_cover) }
+            ofs_array_set(g_icon, i, "")          // reimportado: procurar de novo
+        }
+        auto_art(i)
+        save()
+        update_view()
+        return i
+    }
+
+    vein remove_at(i: stone) -> void {
+        if (i < 0 || i >= count()) { return }
+        _rm_s(g_id, i)
+        _rm_s(g_name, i)
+        _rm_s(g_engine, i)
+        _rm_s(g_engver, i)
+        _rm_s(g_ver, i)
+        _rm_s(g_src, i)
+        _rm_s(g_data, i)
+        _rm_s(g_cover, i)
+        _rm_s(g_icon, i)
+        _rm_i(g_size, i)
+        _rm_s(g_company, i)
+        _rm_s(g_exe, i)
+        _rm_s(g_added, i)
+        _rm_s(g_desc, i)
+        _rm_s(g_mode, i)
+        if (i < ofs_array_len(p_ok)) { _rm_i(p_ok, i) }
+        save()
+        update_view()
+    }
+
+    vein _rm_s(a: Array<obsidian>, i: stone) -> void {
+        forge n = ofs_array_len(a)
+        forge k = i
+        while (k < n - 1) {
+            ofs_array_set(a, k, ofs_array_get(a, k + 1))
+            k++
+        }
+        ofs_array_pop(a)
+    }
+    vein _rm_i(a: Array<stone>, i: stone) -> void {
+        forge n = ofs_array_len(a)
+        forge k = i
+        while (k < n - 1) {
+            ofs_array_set(a, k, ofs_array_get(a, k + 1))
+            k++
+        }
+        ofs_array_pop(a)
+    }
+
+    // ── vista (busca) ────────────────────────────────────────────────────
+    vein _contains(hay: obsidian, needle: obsidian) -> bool {
+        forge h = tx.lower(hay)
+        forge n = tx.lower(needle)
+        forge hl = tx.len(h)
+        forge nl = tx.len(n)
+        if (nl == 0) { return true }
+        forge i = 0
+        while (i + nl <= hl) {
+            if (tx.eq(tx.sub(h, i, nl), n)) { return true }
+            i++
+        }
+        return false
+    }
+
+    vein update_view() -> void {
+        view = []
+        forge i = 0
+        while (i < count()) {
+            forge nm: obsidian = ofs_array_get(g_name, i)
+            if (_contains(nm, query) || _contains(engine_badge(ofs_array_get(g_engine, i)), query)) { ofs_array_push(view, i) }
+            i++
+        }
+        // ordena por nome (insercao; bibliotecas pequenas)
+        forge a = 1
+        while (a < ofs_array_len(view)) {
+            forge cur: stone = ofs_array_get(view, a)
+            forge b = a - 1
+            while (b >= 0 && tx.cmp(tx.lower(ofs_array_get(g_name, ofs_array_get(view, b))), tx.lower(ofs_array_get(g_name, cur))) > 0) {
+                ofs_array_set(view, b + 1, ofs_array_get(view, b))
+                b--
+            }
+            ofs_array_set(view, b + 1, cur)
+            a++
+        }
+    }
+
+    vein gi(v: stone) -> stone { return ofs_array_get(view, v) }
+
+    // fonte `from lib.jogos` (indices da vista)
+    vein jogos_count() -> stone { return ofs_array_len(view) }
+    vein jogos_nome(v: stone) -> obsidian { return ofs_array_get(g_name, gi(v)) }
+    vein jogos_sub(v: stone) -> obsidian {
+        forge i = gi(v)
+        forge ver: obsidian = ofs_array_get(g_ver, i)
+        forge s = status_text(i)
+        if (tx.len(ver) > 0) {
+            forge c0 = tx.at(ver, 0)
+            if (c0 >= 48 && c0 <= 57) { return "v" + ver + " · " + s }
+            return ver + " · " + s
+        }
+        return s
+    }
+    vein jogos_capa(v: stone) -> obsidian { return ofs_array_get(g_cover, gi(v)) }
+    vein jogos_motor(v: stone) -> obsidian { return engine_badge(ofs_array_get(g_engine, gi(v))) }
+    vein jogos_icone(v: stone) -> obsidian { return engine_icon(ofs_array_get(g_engine, gi(v))) }
+
+    vein resumo() -> obsidian {
+        forge n = count()
+        if (n == 1) { return tr("um_jogo") }
+        return tx.num(n) + " " + tr("n_jogos")
+    }
+
+    // ── tamanho de pasta em passos (sem travar a tela) ───────────────────
+    forge sz_queue: Array<obsidian> = []
+    forge sz_total: stone = 0
+    forge sz_files: stone = 0
+    forge sz_busy: bool = false
+
+    vein size_start(dir: obsidian) -> void {
+        sz_queue = []
+        ofs_array_push(sz_queue, dir)
+        sz_total = 0
+        sz_files = 0
+        sz_busy = true
+    }
+
+    // Processa ate `budget` entradas; devolve true quando terminou.
+    vein size_step(budget: stone) -> bool {
+        forge done = 0
+        while (done < budget && ofs_array_len(sz_queue) > 0) {
+            forge d: obsidian = ofs_array_get(sz_queue, ofs_array_len(sz_queue) - 1)
+            ofs_array_pop(sz_queue)
+            forge files = bx.list_dir(d, 1)
+            forge i = 0
+            while (i < ofs_array_len(files)) {
+                forge f: obsidian = ofs_array_get(files, i)
+                sz_total = sz_total + file_size(d + "/" + f)
+                sz_files++
+                i++
+            }
+            forge dirs = bx.list_dir(d, 2)
+            i = 0
+            while (i < ofs_array_len(dirs)) {
+                forge sd: obsidian = ofs_array_get(dirs, i)
+                ofs_array_push(sz_queue, d + "/" + sd)
+                i++
+            }
+            done = done + 1 + ofs_array_len(files)
+        }
+        if (ofs_array_len(sz_queue) == 0) { sz_busy = false }
+        return !sz_busy
+    }
+
+    // ── capas possiveis do jogo i (PNG reais da pasta) ───────────────────
+    forge capas: Array<obsidian> = []
+    // Capa e icone automaticos (Ren'Py: soltos ou dentro dos .rpa; Godot: do .pck).
+    // Uma vez por jogo (g_icon != ""); so preenche a capa se estiver vazia.
+    // Extraidos em <files>/covers/<id>/. Devolve true se mudou algo.
+    vein auto_art(i: stone) -> bool {
+        if (i < 0 || i >= count()) { return false }
+        if (tx.len(ofs_array_get(g_icon, i)) > 0) { return false }
+        forge e: obsidian = ofs_array_get(g_engine, i)
+        forge src: obsidian = ofs_array_get(g_src, i)
+        forge out = root + "/covers/" + ofs_array_get(g_id, i)
+        arte.icone = ""
+        arte.capa = ""
+        if (tx.eq(e, "renpy")) {
+            arte.renpy(src, out)
+        } else if (tx.eq(e, "godot")) {
+            forge pck = arte.escolher_pck(src)
+            if (tx.len(pck) == 0) { return false }
+            arte.godot(src + "/" + pck, out)
+        } else {
+            return false
+        }
+        forge ic = arte.icone
+        if (tx.len(ic) == 0) { ic = "-" }
+        ofs_array_set(g_icon, i, tx.copy(ic))
+        forge cv: obsidian = ofs_array_get(g_cover, i)
+        if (tx.len(cv) == 0 && tx.len(arte.capa) > 0) { ofs_array_set(g_cover, i, tx.copy(arte.capa)) }
+        return true
+    }
+
+    // Jogos ja importados (ao abrir a biblioteca): so os que ainda nao foram procurados.
+    vein auto_art_all() -> void {
+        forge mudou = false
+        forge i = 0
+        while (i < count()) {
+            if (auto_art(i)) { mudou = true }
+            i++
+        }
+        if (mudou) {
+            save()
+            update_view()
+        }
+    }
+
+    vein list_covers(i: stone) -> void {
+        capas = []
+        ofs_array_push(capas, "")
+        forge e: obsidian = ofs_array_get(g_engine, i)
+        if (tx.eq(e, "tactics_moon")) {
+            forge idir: obsidian = ofs_array_get(g_data, i)
+            idir = idir + "/images"
+            forge fs = bx.list_dir(idir, 1)
+            forge k = 0
+            while (k < ofs_array_len(fs) && ofs_array_len(capas) < 120) {
+                forge f: obsidian = ofs_array_get(fs, k)
+                if (tx.eq(ext_of(f), "png") && (tx.starts(f, "BG") || tx.starts(f, "CG") || tx.starts(f, "T0"))) { ofs_array_push(capas, idir + "/" + f) }
+                k++
+            }
+            return
+        }
+        forge src: obsidian = ofs_array_get(g_src, i)
+        _covers_in(root + "/covers/" + ofs_array_get(g_id, i))
+        _covers_in(src)
+        _covers_in(src + "/game")
+        _covers_in(src + "/game/gui")
+    }
+    vein _covers_in(d: obsidian) -> void {
+        forge fs = bx.list_dir(d, 1)
+        forge k = 0
+        while (k < ofs_array_len(fs) && ofs_array_len(capas) < 60) {
+            forge f: obsidian = ofs_array_get(fs, k)
+            if (tx.eq(ext_of(f), "png")) { ofs_array_push(capas, d + "/" + f) }
+            k++
+        }
+    }
+    vein capas_count() -> stone { return ofs_array_len(capas) }
+    vein capas_img(k: stone) -> obsidian { return ofs_array_get(capas, k) }
+    vein capas_nome(k: stone) -> obsidian {
+        forge p: obsidian = ofs_array_get(capas, k)
+        if (tx.len(p) == 0) { return tr("capa_icone") }
+        return tx.file_name(p)
+    }
+}

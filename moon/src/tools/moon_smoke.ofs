@@ -1,0 +1,180 @@
+// moon-smoke — teste de fumaca sem janela (equivalente ao tools/smoke_test.gd).
+//
+//   moon-smoke --game <pasta importada> [--lang en|ja] [--steps 60] [--trace] [--ext]
+//              [--start SCRIPT] [--patch patch.json] [--saves <dir>]
+//
+// Joga como o smoke do Godot: menu -> opcao 1, escolha -> 1, avanca cada fala,
+// imprime a transcricao (SAY/MENU/CHOICE). Com --trace imprime tambem cada
+// instrucao que a VM devolve (BLK) e cada comando emitido (CMD) em JSON.
+// Sem --start comeca pelo start_script do game.json (INIT, menu de titulo).
+
+attach {F:../core/vm.ofs}
+attach {F:../core/save.ofs}
+attach {F:../core/patch.ofs}
+
+extern vein exit(code: stone) -> void
+
+namespace smoke {
+    forge trace: bool = false
+
+    // Formata um array JSON de strings como o print de Array do Godot 4: ["a", "b"]
+    vein garr(a: stone) -> obsidian {
+        forge s = "["
+        forge c = json.first(a)
+        forge firstc = true
+        while (c >= 0) {
+            if (!firstc) { s = s + ", " }
+            firstc = false
+            // String.c_escape do Godot: como JSON, mas tambem escapa a aspa simples
+            forge js = json.stringify(c, "")
+            forge k = 0
+            while (k < tx.len(js)) {
+                if (tx.at(js, k) == 39) { s = s + "\\'" } else { s = s + tx.sub(js, k, 1) }
+                k++
+            }
+            c = json.next(c)
+        }
+        return s + "]"
+    }
+
+    vein flush_cmds() -> void {
+        if (trace) {
+            forge i = 0
+            while (i < ofs_array_len(vm.cmds)) {
+                echo("CMD    " + json.stringify(ofs_array_get(vm.cmds, i), ""))
+                i++
+            }
+        }
+        vm.clear_cmds()
+    }
+}
+
+core main() {
+    forge a = tx.args()
+    forge game = ""
+    forge lang = "en"
+    forge steps = 60
+    forge start = ""
+    forge patch_file = ""
+    forge saves = "/tmp/moon-smoke-saves"
+    forge i = 1
+    while (i < ofs_array_len(a)) {
+        forge k: obsidian = ofs_array_get(a, i)
+        forge v = ""
+        if (i + 1 < ofs_array_len(a)) { v = ofs_array_get(a, i + 1) }
+        if (tx.eq(k, "--game")) { game = v; i++ }
+        else if (tx.eq(k, "--lang")) { lang = v; i++ }
+        else if (tx.eq(k, "--steps")) { steps = tx.to_int(v); i++ }
+        else if (tx.eq(k, "--start")) { start = v; i++ }
+        else if (tx.eq(k, "--patch")) { patch_file = v; i++ }
+        else if (tx.eq(k, "--saves")) { saves = v; i++ }
+        else if (tx.eq(k, "--trace")) { smoke.trace = true }
+        else if (tx.eq(k, "--ext")) { vm.ext = true }
+        i++
+    }
+    if (tx.len(game) == 0) {
+        echo("uso: moon-smoke --game <pasta importada> [--lang en|ja] [--steps N] [--trace] [--start SCRIPT] [--patch arq.json]")
+        exit(2)
+    }
+    forge meta = json.load(game + "/game.json")
+    if (!json.is_obj(meta)) {
+        echo("NO GAMES IN LIBRARY (game.json ausente em " + game + ")")
+        exit(1)
+    }
+    forge gid = json.gs(meta, "id", "moon")
+    forge sub = json.gs(json.get(meta, "languages"), lang, "scripts")
+    forge sdir = game + "/" + sub
+    if (!bx.is_dir(sdir)) { sdir = game + "/scripts" }
+    if (tx.len(start) == 0) { start = json.gs(meta, "start_script", "INIT") }
+    if (tx.len(patch_file) > 0) {
+        forge pj = json.load(patch_file)
+        if (json.is_obj(pj)) {
+            patch.use(pj, tx.dir_name(patch_file))
+            echo("PATCH  " + json.stringify(json.get(pj, "meta"), ""))
+        } else {
+            echo("PATCH  invalido: " + json.error)
+        }
+    }
+    vm.init(sdir)
+    if (!vm.load_script(start, 0)) {
+        echo("ERRO " + vm.last_error)
+        exit(1)
+    }
+    echo("SCENE  PlayerScreen")
+    forge shown_bg = ""
+    forge said = 0
+    forge guard = 0
+    forge ended = false
+    while (guard < steps * 20) {
+        guard++
+        forge ins = vm.run()
+        smoke.flush_cmds()
+        if (smoke.trace) { echo("BLK    " + json.stringify(ins, "")) }
+        forge op = json.gs(ins, "op", "")
+        // como no Godot: depois da ultima fala o player ainda avanca ate o proximo bloqueio
+        if (said >= steps && (tx.eq(op, "say") || tx.eq(op, "choice") || tx.eq(op, "menu") || tx.eq(op, "load_menu"))) { break }
+        if (tx.eq(op, "transition") || tx.eq(op, "blit")) {
+            shown_bg = json.gs(vm.scene, "bg", "")
+        } else if (tx.eq(op, "wait") || tx.eq(op, "wait_sync") || tx.eq(op, "wait_click")) {
+            // o smoke do Godot avanca na hora
+        } else if (tx.eq(op, "say")) {
+            if (!tx.eq(json.gs(vm.scene, "bg", ""), shown_bg)) {
+                vm.commit_layers()
+                shown_bg = json.gs(vm.scene, "bg", "")
+            }
+            said++
+            forge d = patch.apply(vm.script_name, ins)
+            echo("SAY    [" + vm.script_name + " @" + tx.num(json.gi(ins, "addr", -1)) + "] " + json.gs(d, "speaker", "") + ": " + json.gs(d, "text", ""))
+        } else if (tx.eq(op, "choice")) {
+            if (!tx.eq(json.gs(vm.scene, "bg", ""), shown_bg)) {
+                vm.commit_layers()
+                shown_bg = json.gs(vm.scene, "bg", "")
+            }
+            // o smoke_test.gd imprime as opcoes originais (current_ins), sem patch
+            echo("CHOICE " + smoke.garr(json.get(ins, "options")) + " -> 1")
+            vm.set_result(json.gi(ins, "var", 0), 1)
+        } else if (tx.eq(op, "menu")) {
+            echo("MENU   var=" + tx.num(json.gi(ins, "var", 0)) + " buttons=" + tx.num(json.count(json.get(ins, "buttons"))) + " -> pick 1")
+            vm.set_result(json.gi(ins, "var", 0), 1)
+        } else if (tx.eq(op, "load_menu")) {
+            echo("LOAD_MENU (o smoke do Godot fica parado aqui)")
+            break
+        } else if (tx.eq(op, "video")) {
+            // sem .ogv convertido o player do Godot segue direto
+        } else if (tx.eq(op, "end") || tx.eq(op, "stall")) {
+            if (!tx.eq(vm.script_name, "INIT") && vm.has_script("INIT")) {
+                vm.reset()
+                vm.load_script("INIT", 0)
+            } else {
+                echo("END")
+                ended = true
+                break
+            }
+        }
+    }
+    forge sc = vm.scene
+    echo("STATE  script=" + vm.script_name + " bg=" + json.gs(sc, "bg", "") + " chars=" + smoke.garr(json.get(sc, "shown_chars")) + " bgm=" + json.gs(sc, "bgm", "") + " chapter=" + json.gs(sc, "chapter", ""))
+    // ida e volta de save
+    save.set_root(saves)
+    forge st = vm.get_state()
+    json.put_s(st, "lang", lang)
+    json.put_s(st, "chapter", json.gs(sc, "chapter", ""))
+    json.put(st, "backlog", json.arr())
+    json.put_s(st, "game", gid)
+    save.save_slot(gid, "slot12", st, -1)
+    forge back = save.load_slot(gid, "slot12")
+    forge vars_ok = "false"
+    if (json.count(json.get(back, "vars")) == 256) { vars_ok = "true" }
+    echo("SAVE   script=" + json.gs(back, "script", "") + " addr=" + tx.num(json.gi(back, "addr", -1)) + " vars_ok=" + vars_ok)
+    // restaura numa VM zerada e confere que continua do mesmo ponto
+    forge before = json.stringify(vm.get_state(), "")
+    vm.reset()
+    forge restored = vm.set_state(back)
+    forge after = json.stringify(vm.get_state(), "")
+    forge same = "false"
+    if (restored && tx.eq(before, after)) { same = "true" }
+    echo("LOAD   restored=" + same)
+    save.delete_slot(gid, "slot12")
+    echo("RESULT compile_fails=0 lines=" + tx.num(said))
+    exit(0)
+}

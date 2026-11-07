@@ -1,0 +1,1400 @@
+// M.O.O.N — player do MOON. (porta de batch/vn_player_godot/src/ui/PlayerScreen.gd)
+//
+// A cena (fundo, 3 personagens, camadas extras op_3e/3f/56, marcador do mapa
+// op_50-52, menu grafico) e composta num buffer 640x480 e escalada para a
+// tela no canvas da OAL. Retrato: cena em cima, texto e escolhas embaixo.
+// Paisagem: cena centralizada com a caixa de texto por cima da arte.
+
+attach {F:importer.ofs}
+attach {F:../core/vm.ofs}
+attach {F:../core/save.ofs}
+attach {F:../core/patch.ofs}
+attach {audio_android}
+attach {avi}
+
+extern vein memcpy(dst: *stone, src: *stone, size: stone) -> *stone
+
+namespace player {
+    forge CW: stone = 640
+    forge CH: stone = 480
+    forge FADE_MS: stone = 400
+
+    forge W_NONE: stone = 0
+    forge W_SAY: stone = 1
+    forge W_CHOICE: stone = 2
+    forge W_MENU: stone = 3
+    forge W_WAIT: stone = 4
+    forge W_CLICK: stone = 5
+    forge W_END: stone = 6
+    forge W_LOADMENU: stone = 7
+
+    forge active: bool = false
+    forge gidx: stone = -1
+    forge game_id: obsidian = "moon"
+    forge data: obsidian = ""
+    forge source: obsidian = ""
+    forge manifest: stone = -1
+    forge img_names: stone = -1          // hash(UPPER) -> indice em img_files
+    forge img_files: Array<obsidian> = []
+    forge spr_names: stone = -1
+    forge spr_files: Array<obsidian> = []
+
+    forge waiting: stone = 0
+    forge cur_ins: stone = -1
+    forge wait_until: stone = 0
+    forge speaker: obsidian = ""
+    forge line: obsidian = ""
+    forge line_chars: stone = 0
+    forge reveal_t0: stone = 0
+    forge icon_fr: stone = -1
+    forge revealed: stone = -1           // -1 = tudo
+    forge line_done_t: stone = 0
+    forge auto_mode: bool = false
+    forge skip_mode: bool = false
+    forge ui_hidden: bool = false
+    forge ctrl: obsidian = "novel"      // modo de controle: "novel" (toque + botao ⋮) ou "gamepad" (D-pad + losango + ⋮)
+    forge options: Array<obsidian> = []
+    forge sel: stone = 0                 // escolha/botao destacado (dpad)
+    forge menu_btn_x: Array<stone> = []
+    forge menu_btn_y: Array<stone> = []
+    forge menu_btn_w: Array<stone> = []
+    forge menu_btn_h: Array<stone> = []
+    forge menu_normal: obsidian = ""
+    forge menu_hover: obsidian = ""
+    forge menu_var: stone = 0
+
+    // backlog
+    forge bl_speaker: Array<obsidian> = []
+    forge bl_text: Array<obsidian> = []
+
+    // buffers de cena (1 stone por pixel, 0xRRGGBB)
+    forge scene: *stone = null
+    forge old: *stone = null
+    forge fade_t0: stone = -1
+    forge shown_bg: obsidian = "-"
+    forge dirty_scene: bool = true
+
+    // cache de imagens decodificadas (png.*)
+    forge ic_key: Array<obsidian> = []
+    forge ic_id: Array<stone> = []
+
+    // retangulos de toque calculados no desenho (coordenadas do canvas)
+    forge st_x: stone = 0
+    forge st_y: stone = 0
+    forge st_w: stone = 0
+    forge st_h: stone = 0
+    forge ch_x: Array<stone> = []
+    forge ch_y: Array<stone> = []
+    forge ch_w: Array<stone> = []
+    forge ch_h: Array<stone> = []
+    forge _xmap: *stone = null
+    forge _xmap_w: stone = 0
+
+    // audio: pacotes ps0/ps1 da pasta original
+    forge apk: Array<stone> = []
+    forge bgm_name: obsidian = ""
+    forge voice_playing_until: stone = 0
+
+    // video de abertura (snd/*.avi, Microsoft Video 1 decodificado em OFS)
+    forge vid: stone = -1
+    forge vid_t0: stone = 0
+    forge vid_snd: bool = false
+    forge vid_rate: stone = 44100
+    forge vid_shown: stone = -1
+    forge vid_down: bool = false
+
+    // texto do jogo: scripts EN (+ patch) ou JP (scripts_jp)
+    forge lang_jp: bool = false
+
+    forge saving: bool = true            // tela de slots: salvar ou carregar
+    forge down_x: stone = 0
+    forge down_y: stone = 0
+
+    // ── memoria crua ─────────────────────────────────────────────────────
+    vein _rd(p: *stone, i: stone) -> stone {
+        forge q: *stone = fault_step(p, i)
+        forge v = 0
+        fracture { v = *q; }
+        return v
+    }
+    vein _wr(p: *stone, i: stone, v: stone) -> void {
+        forge q: *stone = fault_step(p, i)
+        fracture { *q = v; }
+    }
+
+    // ── imagens ──────────────────────────────────────────────────────────
+    vein _index_dir(dir: obsidian, files: Array<obsidian>) -> stone {
+        forge m = hashmap.new(1024)
+        forge fs = bx.list_dir(dir, 1)
+        forge i = 0
+        while (i < ofs_array_len(fs)) {
+            forge f: obsidian = ofs_array_get(fs, i)
+            if (tx.eq(lib.ext_of(f), "png")) {
+                ofs_array_push(files, dir + "/" + f)
+                hashmap.set(m, cfg._h(tx.upper(tx.basename(f))), ofs_array_len(files) - 1)
+            }
+            i++
+        }
+        return m
+    }
+
+    // caminho do PNG (patch de imagem tem prioridade); "" se nao houver
+    vein image_path(name: obsidian, sprite: bool) -> obsidian {
+        forge key = tx.upper(name)
+        forge ov = patch.image_override(key + ".png")
+        if (tx.len(ov) > 0) { return ov }
+        if (sprite) {
+            forge si = hashmap.get(spr_names, cfg._h(key), -1)
+            if (si >= 0) { return ofs_array_get(spr_files, si) }
+        }
+        forge ii = hashmap.get(img_names, cfg._h(key), -1)
+        if (ii >= 0) { return ofs_array_get(img_files, ii) }
+        oal.log("moon: imagem faltando " + key)
+        return ""
+    }
+
+    vein _png(path: obsidian) -> stone {
+        if (tx.len(path) == 0) { return -1 }
+        forge i = 0
+        while (i < ofs_array_len(ic_key)) {
+            forge k: obsidian = ofs_array_get(ic_key, i)
+            if (tx.eq(k, path)) { return ofs_array_get(ic_id, i) }
+            i++
+        }
+        if (ofs_array_len(ic_key) >= 24) { _cache_clear() }
+        forge im = png.load(path)
+        ofs_array_push(ic_key, path)
+        ofs_array_push(ic_id, im)
+        return im
+    }
+
+    vein _cache_clear() -> void {
+        forge i = 0
+        while (i < ofs_array_len(ic_id)) {
+            oal._free_png(ofs_array_get(ic_id, i))
+            i++
+        }
+        ic_key = []
+        ic_id = []
+    }
+
+    // Copia a imagem para o buffer da cena em (dx, dy), com alfa.
+    vein _blit(im: stone, dx: stone, dy: stone, opaque: bool) -> void {
+        if (im < 0) { return }
+        forge w = png.width(im)
+        forge h = png.height(im)
+        forge px = ofs_array_get(png.img_px, im) as *stone
+        forge y = 0
+        while (y < h) {
+            forge ty = dy + y
+            if (ty >= 0 && ty < CH) {
+                forge x = 0
+                while (x < w) {
+                    forge tx2 = dx + x
+                    if (tx2 >= 0 && tx2 < CW) {
+                        forge v = _rd(px, y * w + x)
+                        forge a = (v >> 24) & 255
+                        if (opaque || a >= 255) {
+                            _wr(scene, ty * CW + tx2, v & 16777215)
+                        } else if (a > 0) {
+                            forge d = _rd(scene, ty * CW + tx2)
+                            forge r = (((v >> 16) & 255) * a + ((d >> 16) & 255) * (255 - a)) / 255
+                            forge g = (((v >> 8) & 255) * a + ((d >> 8) & 255) * (255 - a)) / 255
+                            forge b = ((v & 255) * a + (d & 255) * (255 - a)) / 255
+                            _wr(scene, ty * CW + tx2, (r << 16) | (g << 8) | b)
+                        }
+                    }
+                    x++
+                }
+            }
+            y++
+        }
+    }
+
+    // sprite do manifesto (recortado, com x/y) ou imagem inteira
+    vein _sprite(name: obsidian, ox: stone, oy: stone) -> void {
+        if (tx.len(name) == 0) { return }
+        forge p = image_path(name, true)
+        if (tx.len(p) == 0) { return }
+        forge m = json.get(manifest, "sprites/" + tx.upper(name))
+        forge x = 0
+        forge y = 0
+        if (m >= 0 && tx.ends(p, "/sprites/" + tx.file_name(p))) {
+            x = json.gi(m, "x", 0)
+            y = json.gi(m, "y", 0)
+        }
+        _blit(_png(p), ox + x, oy + y, false)
+    }
+
+    // Recompoe a cena a partir do estado da VM.
+    vein compose() -> void {
+        forge total = CW * CH
+        forge i = 0
+        while (i < total) {
+            _wr(scene, i, 0)
+            i++
+        }
+        if (waiting == W_MENU) {
+            _blit(_png(image_path(menu_normal, false)), 0, 0, true)
+            _menu_hover()
+            dirty_scene = false
+            return
+        }
+        forge bg = json.gs(vm.scene, "bg", "")
+        if (tx.len(bg) > 0) { _blit(_png(image_path(bg, false)), 0, 0, true) }
+        forge chars = json.get(vm.scene, "shown_chars")
+        forge c = json.first(chars)
+        while (c >= 0) {
+            _sprite(json.sval(c), 0, 0)
+            c = json.next(c)
+        }
+        // camadas extras (placa do horario etc.) e marcador do mapa
+        forge k = 0
+        while (k < vm.LX_COUNT) {
+            if (ofs_array_get(vm.lx_on, k) != 0) { _sprite(ofs_array_get(vm.lx_name, k), ofs_array_get(vm.lx_x, k), ofs_array_get(vm.lx_y, k)) }
+            k++
+        }
+        if (vm.mk_on != 0 && tx.len(vm.mk_name) > 0) { _sprite(vm.mk_name, vm.mk_x, vm.mk_y) }
+        vm.layers_changed = false
+        dirty_scene = false
+    }
+
+    // destaque do botao do menu: recorte da imagem "hover"
+    vein _menu_hover() -> void {
+        if (sel < 0 || sel >= ofs_array_len(menu_btn_x)) { return }
+        forge hv = _png(image_path(menu_hover, false))
+        if (hv < 0) { return }
+        forge w = png.width(hv)
+        forge px = ofs_array_get(png.img_px, hv) as *stone
+        forge bx0 = ofs_array_get(menu_btn_x, sel)
+        forge by0 = ofs_array_get(menu_btn_y, sel)
+        forge bw = ofs_array_get(menu_btn_w, sel)
+        forge bh = ofs_array_get(menu_btn_h, sel)
+        forge y = by0
+        while (y < by0 + bh && y < CH && y < png.height(hv)) {
+            forge x = bx0
+            while (x < bx0 + bw && x < CW && x < w) {
+                _wr(scene, y * CW + x, _rd(px, y * w + x) & 16777215)
+                x++
+            }
+            y++
+        }
+    }
+
+    // ── abrir / fechar ───────────────────────────────────────────────────
+    vein open(i: stone, state: stone) -> bool {
+        gidx = i
+        game_id = ofs_array_get(lib.g_id, i)
+        data = ofs_array_get(lib.g_data, i)
+        source = ofs_array_get(lib.g_src, i)
+        if (!bx.exists(data + "/game.json")) { return false }
+        if (scene == null) {
+            scene = ofs_alloc(CW * CH * 8)
+            old = ofs_alloc(CW * CH * 8)
+        }
+        manifest = json.load(data + "/images/manifest.json")
+        if (!json.is_obj(manifest)) { manifest = json.obj() }
+        img_files = []
+        spr_files = []
+        img_names = _index_dir(data + "/images", img_files)
+        spr_names = _index_dir(data + "/images/sprites", spr_files)
+        _cache_clear()
+        patch.ensure_loaded(game_id)
+        if (!imp.sjis_ok) { imp.sjis_ok = tm.load_sjis(imp.sjis_path) }
+        if (!imp.sjis_ok) { return false }
+        // audio direto dos pacotes originais (sem copiar 1,5 GB)
+        apk = []
+        forge p0 = tm.pack_open(source + "/ps0")
+        if (p0 >= 0) { ofs_array_push(apk, p0) }
+        forge p1 = tm.pack_open(source + "/ps1")
+        if (p1 >= 0) { ofs_array_push(apk, p1) }
+        audio.open()
+        apply_volumes()
+        vm.ext = true
+        vm.layers = true
+        // patch ativo traduz o texto EN: o idioma JP ligado o ignoraria (causa do "patch nao funciona")
+        if (tx.eq(cfg.game_lang, "ja") && tx.len(patch.active_id(game_id)) > 0) {
+            cfg.game_lang = "en"
+            cfg.save()
+        }
+        lang_jp = tx.eq(cfg.game_lang, "ja") && has_jp()
+        _forget_scripts()
+        vm.init(_scripts_dir(lang_jp))
+        bl_speaker = []
+        bl_text = []
+        auto_mode = false
+        skip_mode = false
+        ui_hidden = false
+        waiting = W_NONE
+        speaker = ""
+        line = ""
+        shown_bg = "-"
+        fade_t0 = -1
+        bgm_name = ""
+        active = true
+        if (state >= 0) {
+            if (!restore(state)) { return false }
+        } else {
+            forge meta = json.load(data + "/game.json")
+            if (!vm.load_script(json.gs(meta, "start_script", "INIT"), 0)) { return false }
+        }
+        android.keep_screen_on(true)
+        _sys_load()
+        enter_orientation()
+        oal.set_animating(true)
+        cont()
+        return true
+    }
+
+    vein close() -> void {
+        if (!active) { return }
+        active = false
+        video_stop()
+        audio.stop_all()
+        audio.pump()
+        bgm_name = ""
+        oal.set_animating(false)
+        android.keep_screen_on(false)
+        _sys_save()
+        android.set_immersive(false)
+        _cache_clear()
+    }
+
+    // ── orientacao e tela cheia do player (padrao: paisagem imersiva) ────
+    vein enter_orientation() -> void {
+        android.set_cutout_short_edges(true)
+        android.set_immersive(true)
+        if (cfg.player_orient == 1) { oal.set_orientation(oal.ORIENT_PORTRAIT) } else { oal.set_orientation(oal.ORIENT_LANDSCAPE) }
+    }
+
+    vein toggle_orientation() -> void {
+        if (cfg.player_orient == 1) { cfg.player_orient = 2 } else { cfg.player_orient = 1 }
+        cfg.save()
+        enter_orientation()
+        if (cfg.player_orient == 1) { oal.toast(tr("or_retrato")) } else { oal.toast(tr("or_paisagem")) }
+        oal.refresh()
+    }
+
+    vein orient_icon() -> obsidian {
+        if (cfg.player_orient == 1) { return "landscape" }
+        return "portrait"
+    }
+
+    // ── save de sistema (flags globais: galeria/extras) ──────────────────
+    vein _sys_path() -> obsidian { return save.root + "/" + game_id + "/system.json" }
+
+    vein _sys_load() -> void {
+        forge m = json.mark()
+        forge o = json.load(_sys_path())
+        vm.globals_from(o)
+        json.release(m)
+    }
+
+    vein _sys_save() -> void {
+        if (!active && !vm.globals_dirty) { return }
+        bx.mkdir_p(save.root + "/" + game_id)
+        forge m = json.mark()
+        json.save(_sys_path(), vm.globals_json(), "")
+        json.release(m)
+        vm.globals_dirty = false
+    }
+
+    vein apply_volumes() -> void {
+        audio.set_volume(audio.CH_MUSIC, cfg.vol_bgm)
+        audio.set_volume(audio.CH_VOICE, cfg.vol_voice)
+        audio.set_master(cfg.vol_master)
+    }
+
+    // ── audio ────────────────────────────────────────────────────────────
+    vein _sound(file: obsidian) -> stone {
+        forge name = tx.upper(tx.basename(file)) + ".WAV"
+        forge i = 0
+        while (i < ofs_array_len(apk)) {
+            forge pk = ofs_array_get(apk, i)
+            if (tm.pack_has(pk, name)) {
+                forge b = tm.pack_read(pk, name)
+                forge n = bx.last_len
+                if (b == 0) { return -1 }
+                forge s = wav.decode(b, n)
+                bx.free(b)
+                return s
+            }
+            i++
+        }
+        oal.log("moon: audio faltando " + name)
+        return -1
+    }
+
+    vein play_bgm(file: obsidian, loop: bool) -> void {
+        if (tx.eq(file, bgm_name) && audio.playing(audio.CH_MUSIC)) { return }
+        bgm_name = file
+        audio.play(audio.CH_MUSIC, _sound(file), loop)
+    }
+
+    vein _on_cmds() -> void {
+        forge i = 0
+        while (i < ofs_array_len(vm.cmds)) {
+            forge ins: stone = ofs_array_get(vm.cmds, i)
+            forge op = json.gs(ins, "op", "")
+            if (tx.eq(op, "audio")) {
+                if (json.gi(ins, "channel", 0) == 0) {
+                    play_bgm(json.gs(ins, "file", ""), json.gi(ins, "loop", 0) != 0)
+                } else if (!skip_mode) {
+                    forge s = _sound(json.gs(ins, "file", ""))
+                    if (s >= 0) {
+                        voice_playing_until = oal.now_ms + (wav.frames(s) * 1000) / 44100
+                        audio.play(audio.CH_VOICE, s, false)
+                    }
+                }
+            } else if (tx.eq(op, "stop_audio")) {
+                if (json.gi(ins, "channel", 0) == 0) {
+                    audio.stop(audio.CH_MUSIC)
+                    bgm_name = ""
+                } else {
+                    audio.stop(audio.CH_VOICE)
+                }
+            } else if (tx.eq(op, "chapter")) {
+                forge d = patch.apply(vm.script_name, ins)
+                forge t = tx.strip(json.gs(d, "title", ""))
+                if (tx.len(t) > 0 && !skip_mode) { oal.toast(t) }
+            }
+            i++
+        }
+        vm.clear_cmds()
+    }
+
+    // ── laco da VM (como _continue do Godot) ─────────────────────────────
+    vein cont() -> void {
+        forge guard = 0
+        while (guard < 2000) {
+            guard++
+            forge ins = vm.run()
+            _on_cmds()
+            cur_ins = ins
+            forge op = json.gs(ins, "op", "")
+            if (tx.eq(op, "transition") || tx.eq(op, "blit")) {
+                forge eff = 1
+                if (tx.eq(op, "transition")) { eff = json.gi(ins, "effect", 1) }
+                apply_scene(eff != 1 && !skip_mode)
+                continue
+            }
+            if (tx.eq(op, "wait") || tx.eq(op, "wait_sync")) {
+                if (skip_mode) { continue }
+                waiting = W_WAIT
+                wait_until = oal.now_ms + json.gi(ins, "ms", 0)
+                _done()
+                return
+            }
+            if (tx.eq(op, "wait_click")) {
+                if (skip_mode) { continue }
+                waiting = W_CLICK
+                _done()
+                return
+            }
+            if (tx.eq(op, "say")) {
+                _flush_scene()
+                show_line(ins)
+                waiting = W_SAY
+                _done()
+                return
+            }
+            if (tx.eq(op, "choice")) {
+                _flush_scene()
+                skip_mode = false
+                show_choices(ins)
+                waiting = W_CHOICE
+                _done()
+                return
+            }
+            if (tx.eq(op, "menu")) {
+                skip_mode = false
+                show_menu(ins)
+                _done()
+                return
+            }
+            if (tx.eq(op, "load_menu")) {
+                waiting = W_LOADMENU
+                _done()
+                app_open_slots(false)
+                return
+            }
+            if (tx.eq(op, "video")) {
+                // o wait_click seguinte espera o fim do video ou um toque
+                if (!skip_mode) { video_start(json.gs(ins, "file", "")) }
+                continue
+            }
+            if (tx.eq(op, "video_end")) {
+                video_stop()
+                continue
+            }
+            if (tx.eq(op, "end") || tx.eq(op, "stall")) {
+                if (!tx.eq(vm.script_name, "INIT") && vm.has_script("INIT")) {
+                    oal.toast(tr("fim_capitulo"))
+                    vm.reset()
+                    vm.load_script("INIT", 0)
+                    speaker = ""
+                    line = ""
+                    continue
+                }
+                waiting = W_END
+                _done()
+                return
+            }
+        }
+        _done()
+    }
+
+    forge _last_script: obsidian = ""
+    vein _log_script() -> void {
+        if (!tx.eq(vm.script_name, _last_script)) {
+            _last_script = vm.script_name
+            oal.log("moon: script " + vm.script_name)
+        }
+    }
+
+    vein _done() -> void {
+        _log_script()
+        if (vm.layers_changed) { dirty_scene = true }
+        oal.refresh()
+    }
+
+    vein _flush_scene() -> void {
+        if (!tx.eq(json.gs(vm.scene, "bg", ""), shown_bg)) {
+            vm.commit_layers()
+            apply_scene(false)
+        }
+    }
+
+    vein apply_scene(fade: bool) -> void {
+        if (fade) {
+            memcpy(old, scene, CW * CH * 8)
+            fade_t0 = oal.now_ms
+        }
+        compose()
+        shown_bg = json.gs(vm.scene, "bg", "")
+        oal.redraw()
+    }
+
+    // Setas U+2190..2193 (nos mapas) nao existem na Roboto: < > ^ v
+    // (so quando nem a fonte de fallback CJK tem as setas)
+    vein fix_glyphs(t: obsidian) -> obsidian {
+        if (ttf.has_glyph(oal.font(), 8592)) { return t }
+        forge n = tx.len(t)
+        forge i = 0
+        forge has = false
+        while (i + 2 < n) {
+            if (tx.at(t, i) == 226 && tx.at(t, i + 1) == 134) { has = true }
+            i++
+        }
+        if (!has) { return t }
+        forge out = ""
+        forge start = 0
+        i = 0
+        while (i < n) {
+            if (i + 2 < n && tx.at(t, i) == 226 && tx.at(t, i + 1) == 134 && tx.at(t, i + 2) >= 144 && tx.at(t, i + 2) <= 147) {
+                out = out + tx.sub(t, start, i - start)
+                forge c = tx.at(t, i + 2)
+                if (c == 144) { out = out + "<" }
+                if (c == 145) { out = out + "^" }
+                if (c == 146) { out = out + ">" }
+                if (c == 147) { out = out + "v" }
+                i = i + 3
+                start = i
+                continue
+            }
+            i++
+        }
+        return out + tx.sub(t, start, n - start)
+    }
+
+    vein _display(ins: stone) -> stone {
+        if (lang_jp) { return ins }        // o patch traduz o texto EN
+        return patch.apply(vm.script_name, ins)
+    }
+
+    vein show_line(ins: stone) -> void {
+        forge d = _display(ins)
+        speaker = json.gs(d, "speaker", "")
+        line = fix_glyphs(json.gs(d, "text", ""))
+        forge nb = ofs_array_len(bl_text)
+        forge dup = nb > 0 && tx.eq(ofs_array_get(bl_text, nb - 1), line) && tx.eq(ofs_array_get(bl_speaker, nb - 1), speaker)
+        if (!dup && tx.len(line) > 0) {
+            ofs_array_push(bl_speaker, speaker)
+            ofs_array_push(bl_text, line)
+        }
+        if (ofs_array_len(bl_text) > 300) {
+            lib._rm_s(bl_speaker, 0)
+            lib._rm_s(bl_text, 0)
+        }
+        line_chars = ttf.chars(line)
+        reveal_t0 = oal.now_ms
+        revealed = 0
+        if (cfg.text_speed <= 0 || skip_mode) { revealed = -1 }
+        line_done_t = oal.now_ms
+    }
+
+    vein show_choices(ins: stone) -> void {
+        forge d = _display(ins)
+        options = []
+        forge c = json.first(json.get(d, "options"))
+        if (c < 0) { c = json.first(json.get(ins, "options")) }
+        while (c >= 0) {
+            ofs_array_push(options, fix_glyphs(json.sval(c)))
+            c = json.next(c)
+        }
+        sel = 0
+    }
+
+    vein show_menu(ins: stone) -> void {
+        menu_normal = json.gs(ins, "normal", "")
+        menu_hover = json.gs(ins, "hover", "")
+        menu_var = json.gi(ins, "var", 0)
+        menu_btn_x = []
+        menu_btn_y = []
+        menu_btn_w = []
+        menu_btn_h = []
+        forge c = json.first(json.get(ins, "buttons"))
+        while (c >= 0) {
+            ofs_array_push(menu_btn_w, json.ival(json.at(c, 0)))
+            ofs_array_push(menu_btn_h, json.ival(json.at(c, 1)))
+            ofs_array_push(menu_btn_x, json.ival(json.at(c, 2)))
+            ofs_array_push(menu_btn_y, json.ival(json.at(c, 3)))
+            c = json.next(c)
+        }
+        sel = 0
+        waiting = W_MENU
+        compose()
+        oal.redraw()
+    }
+
+    vein choose(i: stone) -> void {
+        if (waiting != W_CHOICE) { return }
+        if (i < 0 || i >= ofs_array_len(options)) { return }
+        vm.set_result(json.gi(cur_ins, "var", 0), i + 1)
+        ofs_array_push(bl_speaker, "")
+        ofs_array_push(bl_text, "» " + ofs_array_get(options, i))
+        waiting = W_NONE
+        options = []
+        cont()
+    }
+
+    vein menu_pick(i: stone) -> void {
+        if (waiting != W_MENU) { return }
+        vm.set_result(menu_var, i + 1)
+        waiting = W_NONE
+        shown_bg = "-"
+        dirty_scene = true
+        cont()
+    }
+
+    vein advance() -> void {
+        if (waiting == W_SAY) {
+            if (revealed >= 0 && revealed < line_chars) {
+                revealed = -1
+                line_done_t = oal.now_ms
+                oal.redraw()
+                return
+            }
+            waiting = W_NONE
+            cont()
+            return
+        }
+        if (waiting == W_CLICK || waiting == W_WAIT) {
+            waiting = W_NONE
+            cont()
+            return
+        }
+        if (waiting == W_END) {
+            app_exit_player()
+        }
+    }
+
+    // ── a cada quadro (on frame) ─────────────────────────────────────────
+    vein tick() -> void {
+        if (!active) { return }
+        audio.pump()
+        if (vid >= 0) {
+            _video_tick()
+            return
+        }
+        if (vm.globals_dirty) { _sys_save() }
+        forge now = oal.now_ms
+        if (fade_t0 >= 0) {
+            if (now - fade_t0 >= FADE_MS) { fade_t0 = -1 }
+            oal.redraw()
+        }
+        if (dirty_scene) {
+            compose()
+            oal.redraw()
+        }
+        if (waiting == W_WAIT && now >= wait_until) {
+            advance()
+            return
+        }
+        if (waiting == W_SAY) {
+            if (revealed >= 0) {
+                forge r = ((now - reveal_t0) * cfg.text_speed) / 1000
+                if (r >= line_chars) {
+                    revealed = -1
+                    line_done_t = now
+                    oal.redraw()
+                } else if (r != revealed) {
+                    revealed = r
+                    oal.redraw()
+                }
+                return
+            }
+            if (skip_mode) {
+                advance()
+                return
+            }
+            if (auto_mode && now >= voice_playing_until && now - line_done_t >= cfg.auto_delay * 100) {
+                advance()
+                return
+            }
+        }
+        if (waiting == W_CLICK && skip_mode) { advance() }
+        // icone de espera animado: redesenha quando o quadro muda
+        if (tx.len(vm.ui_icon) > 0 && revealed < 0 && (waiting == W_SAY || waiting == W_CLICK)) {
+            forge ifr = _icon_frame(now)
+            if (ifr != icon_fr) {
+                icon_fr = ifr
+                oal.redraw()
+            }
+        }
+    }
+
+    // ── desenho ──────────────────────────────────────────────────────────
+    // preenchimento rapido direto no buffer (sem recorte por pixel)
+    vein _fill(cv: Canvas, x: stone, y: stone, w: stone, h: stone, c: stone) -> void {
+        forge x0 = x
+        forge y0 = y
+        forge x1 = x + w
+        forge y1 = y + h
+        if (x0 < 0) { x0 = 0 }
+        if (y0 < 0) { y0 = 0 }
+        if (x1 > cv.width) { x1 = cv.width }
+        if (y1 > cv.height) { y1 = cv.height }
+        forge yy = y0
+        while (yy < y1) {
+            forge row = yy * cv.width
+            forge xx = x0
+            while (xx < x1) {
+                _wr(cv.buffer, row + xx, c)
+                xx++
+            }
+            yy++
+        }
+    }
+
+    // Cena escalada (vizinho mais proximo) em (x, y, w, h) do canvas da OAL.
+    vein _draw_stage(cv: Canvas, x: stone, y: stone, w: stone, h: stone) -> void {
+        if (w <= 0 || h <= 0) { return }
+        if (_xmap_w != w) {
+            if (_xmap != null) { ofs_free(_xmap) }
+            _xmap = ofs_alloc(w * 8)
+            _xmap_w = w
+            forge k = 0
+            while (k < w) {
+                _wr(_xmap, k, (k * CW) / w)
+                k++
+            }
+        }
+        forge fa = -1
+        if (fade_t0 >= 0) {
+            fa = ((oal.now_ms - fade_t0) * 256) / FADE_MS
+            if (fa > 256) { fa = 256 }
+            if (fa < 0) { fa = 0 }
+        }
+        forge yy = 0
+        while (yy < h) {
+            forge ty = y + yy
+            if (ty >= 0 && ty < cv.height) {
+                forge sy = (yy * CH) / h
+                forge srow = sy * CW
+                forge drow = ty * cv.width + x
+                forge xx = 0
+                if (fa < 0) {
+                    while (xx < w) {
+                        _wr(cv.buffer, drow + xx, _rd(scene, srow + _rd(_xmap, xx)))
+                        xx++
+                    }
+                } else {
+                    while (xx < w) {
+                        forge si = srow + _rd(_xmap, xx)
+                        forge a = _rd(scene, si)
+                        forge b = _rd(old, si)
+                        forge r = (((a >> 16) & 255) * fa + ((b >> 16) & 255) * (256 - fa)) >> 8
+                        forge g = (((a >> 8) & 255) * fa + ((b >> 8) & 255) * (256 - fa)) >> 8
+                        forge bl = ((a & 255) * fa + (b & 255) * (256 - fa)) >> 8
+                        _wr(cv.buffer, drow + xx, (r << 16) | (g << 8) | bl)
+                        xx++
+                    }
+                }
+            }
+            yy++
+        }
+    }
+
+    // Icone de espera animado (op_2d/op_41): ICONDEF tem 7 quadros de 32x32 por linha;
+    // a linha 0 e a seta de "clique para continuar". Vizinho mais proximo, com alfa.
+    vein _icon_frame(now: stone) -> stone {
+        forge n = vm.ui_icon_frames
+        if (n < 1) { n = 1 }
+        forge ms = vm.ui_icon_wait * 10
+        if (ms < 50) { ms = 50 }
+        return (now / ms) % n
+    }
+
+    vein _wait_icon(cv: Canvas, x: stone, y: stone, sz: stone) -> void {
+        if (tx.len(vm.ui_icon) == 0) { return }
+        forge p = image_path(vm.ui_icon, true)
+        if (tx.len(p) == 0) { return }
+        forge im = _png(p)
+        if (im < 0) { return }
+        forge iw = png.width(im)
+        forge px = ofs_array_get(png.img_px, im) as *stone
+        forge cell = iw / vm.ui_icon_frames
+        if (cell < 1) { return }
+        forge fx = _icon_frame(oal.now_ms) * cell
+        forge yy = 0
+        while (yy < sz) {
+            forge ty = y + yy
+            if (ty >= 0 && ty < cv.height) {
+                forge sy = (yy * cell) / sz
+                forge xx = 0
+                while (xx < sz) {
+                    forge tx3 = x + xx
+                    if (tx3 >= 0 && tx3 < cv.width) {
+                        forge v = _rd(px, sy * iw + fx + (xx * cell) / sz)
+                        forge a = (v >> 24) & 255
+                        if (a > 0) {
+                            forge di = ty * cv.width + tx3
+                            forge d = _rd(cv.buffer, di)
+                            forge r = (((v >> 16) & 255) * a + ((d >> 16) & 255) * (255 - a)) / 255
+                            forge g = (((v >> 8) & 255) * a + ((d >> 8) & 255) * (255 - a)) / 255
+                            forge b = ((v & 255) * a + (d & 255) * (255 - a)) / 255
+                            _wr(cv.buffer, di, (r << 16) | (g << 8) | b)
+                        }
+                    }
+                    xx++
+                }
+            }
+            yy++
+        }
+    }
+
+    // Cor de fundo das camadas sobrepostas, com a opacidade da configuracao.
+    vein _ov(rgb: stone) -> stone {
+        forge pct = cfg.ctrl_opacity
+        if (pct < 30) { pct = 30 }
+        forge a = (pct * 235) / 100
+        return a * 16777216 + rgb
+    }
+
+    // O jogo ocupa a tela toda (escala 4:3 com letterbox preto); texto,
+    // escolhas e botoes sao camadas por cima, nunca empurram a imagem.
+    vein paint(x: stone, y: stone, w: stone, h: stone) -> void {
+        forge cv = oal.cv()
+        if (dirty_scene && vid < 0) { compose() }
+        forge sw = w
+        forge sh = (w * 3) / 4
+        if (sh > h) {
+            sh = h
+            sw = (h * 4) / 3
+        }
+        forge sx = x + (w - sw) / 2
+        forge sy = y + (h - sh) / 2
+        st_x = sx
+        st_y = sy
+        st_w = sw
+        st_h = sh
+        _fill(cv, x, y, w, sy - y, 0)
+        _fill(cv, x, sy + sh, w, y + h - sy - sh, 0)
+        _fill(cv, x, sy, sx - x, sh, 0)
+        _fill(cv, sx + sw, sy, x + w - sx - sw, sh, 0)
+        _draw_stage(cv, sx, sy, sw, sh)
+        if (vid >= 0) { return }
+        ch_x = []
+        ch_y = []
+        ch_w = []
+        ch_h = []
+        if (ui_hidden || waiting == W_MENU) { return }
+        forge port = h > w
+        forge f = oal.font()
+        forge fb = oal.font_bold()
+        forge fs = oal._fs(17)
+        forge lh = ttf.line_height(f, fs)
+        if (lh < fs) { lh = (fs * 13) / 10 }
+        // op_39: espaco extra entre linhas (padrao do jogo 4 px de 640)
+        if (vm.ui_set) { lh = lh + ((vm.ui_linesp - 4) * sw) / 640 }
+        // largura da caixa: a da imagem em paisagem (as colunas de botoes
+        // ficam nas faixas pretas); a tela toda em retrato
+        forge bw = sw - oal.dp(16)
+        forge bx0 = sx + oal.dp(8)
+        if (port) {
+            bw = w - oal.dp(16)
+            bx0 = x + oal.dp(8)
+        }
+        forge reserve = oal.dp(8)
+        if (port) { reserve = (oal.dp(56) * oal.overlay_scale) / 100 + oal.dp(28) }
+        forge bottom = y + h - reserve
+        if (!port) { bottom = sy + sh - oal.dp(8) }
+        if (waiting == W_CHOICE) {
+            forge cw = (bw * 85) / 100
+            _draw_choices(cv, x + (w - cw) / 2, y + h / 5, cw, true)
+            return
+        }
+        if (tx.len(line) == 0 && tx.len(speaker) == 0) { return }
+        forge tw = bw - oal.dp(32)
+        forge lines = ttf.wrap(f, fs, line, tw)
+        forge bh = ofs_array_len(lines) * lh + oal.dp(28)
+        if (tx.len(speaker) > 0) { bh = bh + oal._fs(15) + oal.dp(8) }
+        if (bh < oal.dp(96)) { bh = oal.dp(96) }
+        forge by0 = bottom - bh
+        raster.fill_round_rect(cv, bx0 as crystal, by0 as crystal, bw as crystal, bh as crystal, oal.dp(14) as crystal, _ov(cfg.textbox()))
+        forge ty2 = by0 + oal.dp(14)
+        if (tx.len(speaker) > 0) {
+            ttf.draw(cv, fb, oal._fs(15), bx0 + oal.dp(16), ty2 + ttf.ascent(fb, oal._fs(15)), speaker, 16105100)
+            ty2 = ty2 + oal._fs(15) + oal.dp(8)
+        }
+        forge ink = 16316664
+        if (vm.ui_set) {
+            ink = vm.ui_text_rgb
+            // op_37: sombra do texto (1 px escalado)
+            if (vm.ui_shadow_rgb != ink) { ttf.draw_wrapped(cv, f, fs, bx0 + oal.dp(16) + oal.dp(1), ty2 + oal.dp(1), tw, lh, line, vm.ui_shadow_rgb, revealed) }
+        }
+        ttf.draw_wrapped(cv, f, fs, bx0 + oal.dp(16), ty2, tw, lh, line, ink, revealed)
+        if (revealed < 0 && (waiting == W_SAY || waiting == W_CLICK)) {
+            forge isz = oal.dp(24)
+            _wait_icon(cv, bx0 + bw - isz - oal.dp(10), by0 + bh - isz - oal.dp(6), isz)
+        }
+    }
+
+    vein _entry_h(f: stone, fb: stone, fs: stone, lh: stone, sp: obsidian, t: obsidian, w: stone) -> stone {
+        forge hh = ofs_array_len(ttf.wrap(f, fs, t, w)) * lh
+        if (tx.len(sp) > 0) { hh = hh + fs + oal.dp(6) }
+        return hh
+    }
+
+    vein _draw_entry(cv: Canvas, f: stone, fb: stone, fs: stone, lh: stone, x: stone, y: stone, w: stone, sp: obsidian, t: obsidian, ink: stone, sp_ink: stone, maxc: stone) -> void {
+        forge yy = y
+        if (tx.len(sp) > 0) {
+            ttf.draw(cv, fb, fs, x, yy + ttf.ascent(fb, fs), sp, sp_ink)
+            yy = yy + fs + oal.dp(6)
+        }
+        ttf.draw_wrapped(cv, f, fs, x, yy, w, lh, t, ink, maxc)
+    }
+
+    vein _draw_choices(cv: Canvas, x: stone, y: stone, w: stone, over_art: bool) -> void {
+        forge f = oal.font()
+        forge fs = oal._fs(16)
+        forge lh = ttf.line_height(f, fs)
+        if (lh < fs) { lh = (fs * 13) / 10 }
+        forge gap = oal.dp(10)
+        forge pad = oal.dp(14)
+        forge by = y
+        forge i = 0
+        while (i < ofs_array_len(options)) {
+            forge t: obsidian = ofs_array_get(options, i)
+            forge lines = ttf.wrap(f, fs, t, w - oal.dp(32))
+            forge nl = ofs_array_len(lines)
+            if (nl > 3) { nl = 3 }
+            forge bh = nl * lh + pad * 2
+            if (bh < oal.dp(52)) { bh = oal.dp(52) }
+            forge fill = oal.c_surface
+            if (over_art) { fill = _ov(1580080) }
+            if (i == sel) { fill = oal.c_accent }
+            if (over_art && vm.ui_set && i == sel) { fill = _ov(vm.ui_sel_rgb) }
+            raster.fill_round_rect(cv, x as crystal, by as crystal, w as crystal, bh as crystal, oal.dp(12) as crystal, fill)
+            forge ink = oal.c_fg
+            if (over_art) { ink = 16316664 }
+            if (over_art && vm.ui_set) { ink = vm.ui_norm_rgb }
+            if (i == sel) { ink = oal.c_accent_fg }
+            if (over_art && vm.ui_set && i == sel) { ink = 16316664 }
+            forge ty = by + (bh - nl * lh) / 2
+            forge k = 0
+            while (k < nl) {
+                ttf.draw(cv, f, fs, x + oal.dp(16), ty + k * lh + ttf.ascent(f, fs), ofs_array_get(lines, k), ink)
+                k++
+            }
+            ofs_array_push(ch_x, x)
+            ofs_array_push(ch_y, by)
+            ofs_array_push(ch_w, w)
+            ofs_array_push(ch_h, bh)
+            by = by + bh + gap
+            i++
+        }
+    }
+
+    // ── toque no canvas (kind 0 desce, 1 move, 2 sobe) ───────────────────
+    vein touch(kind: stone, finger: stone, x: stone, y: stone) -> void {
+        if (kind == 0) {
+            down_x = x
+            down_y = y
+            vid_down = vid >= 0
+            return
+        }
+        if (kind != 2) { return }
+        if (x < 0) { return }
+        if (vid >= 0) {
+            // toque pula o video (so se o dedo desceu durante o video: o
+            // "soltar" do botao Jogar chega aqui e nao pode pular)
+            if (!vid_down) { return }
+            vid_down = false
+            oal.log("moon: video pulado por toque em " + tx.num(x) + "," + tx.num(y))
+            video_stop()
+            if (waiting == W_CLICK) { advance() }
+            return
+        }
+        forge dx = x - down_x
+        forge dy = y - down_y
+        if (dx > oal.dp(24) || dx < 0 - oal.dp(24) || dy > oal.dp(24) || dy < 0 - oal.dp(24)) { return }
+        // as coordenadas do canvas sao relativas a ele; os retangulos tambem
+        forge cx = x + oal.inset_left
+        forge cy = y + oal._top_h()
+        if (ui_hidden) {
+            ui_hidden = false
+            oal.refresh()
+            return
+        }
+        if (waiting == W_CHOICE) {
+            forge i = 0
+            while (i < ofs_array_len(ch_x)) {
+                if (cx >= ofs_array_get(ch_x, i) && cx < ofs_array_get(ch_x, i) + ofs_array_get(ch_w, i) && cy >= ofs_array_get(ch_y, i) && cy < ofs_array_get(ch_y, i) + ofs_array_get(ch_h, i)) {
+                    choose(i)
+                    return
+                }
+                i++
+            }
+            return
+        }
+        if (waiting == W_MENU) {
+            if (st_w <= 0) { return }
+            forge mx = ((cx - st_x) * CW) / st_w
+            forge my = ((cy - st_y) * CH) / st_h
+            forge b = 0
+            while (b < ofs_array_len(menu_btn_x)) {
+                if (mx >= ofs_array_get(menu_btn_x, b) && mx < ofs_array_get(menu_btn_x, b) + ofs_array_get(menu_btn_w, b) && my >= ofs_array_get(menu_btn_y, b) && my < ofs_array_get(menu_btn_y, b) + ofs_array_get(menu_btn_h, b)) {
+                    sel = b
+                    compose()
+                    menu_pick(b)
+                    return
+                }
+                b++
+            }
+            return
+        }
+        advance()
+    }
+
+    // D-pad: cima/baixo movem o destaque (escolha ou botao do menu)
+    vein dpad(dir: stone) -> void {
+        forge n = 0
+        if (waiting == W_CHOICE) { n = ofs_array_len(options) }
+        if (waiting == W_MENU) { n = ofs_array_len(menu_btn_x) }
+        if (n == 0) { return }
+        if (dir == oal.DIR_UP || dir == oal.DIR_LEFT) { sel = (sel + n - 1) % n }
+        if (dir == oal.DIR_DOWN || dir == oal.DIR_RIGHT) { sel = (sel + 1) % n }
+        if (dir == oal.DIR_NONE) { return }
+        if (waiting == W_MENU) { compose() }
+        oal.redraw()
+    }
+
+    vein confirm() -> void {
+        if (waiting == W_CHOICE) {
+            choose(sel)
+            return
+        }
+        if (waiting == W_MENU) {
+            menu_pick(sel)
+            return
+        }
+        advance()
+    }
+
+    vein needs_dpad() -> bool { return active && !ui_hidden && tx.eq(ctrl, "gamepad") && (waiting == W_CHOICE || waiting == W_MENU) }
+    vein show_controls() -> bool { return !ui_hidden && vid < 0 }
+
+    vein toggle_auto() -> void {
+        auto_mode = !auto_mode
+        if (auto_mode) { oal.toast(tr("auto_on")) } else { oal.toast(tr("auto_off")) }
+        line_done_t = oal.now_ms
+        oal.refresh()
+    }
+
+    vein toggle_skip() -> void {
+        skip_mode = !skip_mode
+        if (skip_mode) {
+            oal.toast(tr("skip_on"))
+            audio.stop(audio.CH_VOICE)
+            advance()
+        } else {
+            oal.toast(tr("skip_off"))
+        }
+        oal.refresh()
+    }
+
+    vein toggle_hide() -> void {
+        ui_hidden = !ui_hidden
+        if (ui_hidden) { oal.toast(tr("mostrar_ui")) }
+        oal.refresh()
+    }
+
+    vein icon_auto() -> obsidian {
+        if (auto_mode) { return "pause" }
+        return "auto"
+    }
+    vein icon_skip() -> obsidian {
+        if (skip_mode) { return "stop" }
+        return "skip"
+    }
+
+    // ── idioma do texto (EN + patch ou JP) ───────────────────────────────
+    vein has_jp() -> bool { return bx.exists(data + "/scripts_jp/INIT.json") }
+
+    vein _scripts_dir(jp: bool) -> obsidian {
+        if (jp) { return data + "/scripts_jp" }
+        return data + "/scripts"
+    }
+
+    // Os scripts EN e JP tem os mesmos nomes (INIT, DAY01...): ao trocar o
+    // idioma, o cache de scripts da VM precisa esquecer os ja carregados.
+    vein _forget_scripts() -> void {
+        forge i = 0
+        while (i < ofs_array_len(vm.c_name)) {
+            ofs_array_set(vm.c_name, i, "")
+            i++
+        }
+    }
+
+    // Troca o idioma do texto. Os scripts EN e JP nao tem os mesmos
+    // enderecos, entao a troca recomeca na tela de titulo (INIT).
+    vein set_lang_jp(on: bool) -> void {
+        cfg.game_lang = "en"
+        if (on) { cfg.game_lang = "ja" }
+        cfg.save()
+        if (!active || on == lang_jp) { return }
+        if (on && !has_jp()) { return }
+        video_stop()
+        lang_jp = on
+        _forget_scripts()
+        vm.init(_scripts_dir(on))
+        vm.load_script("INIT", 0)
+        speaker = ""
+        line = ""
+        options = []
+        waiting = W_NONE
+        skip_mode = false
+        auto_mode = false
+        shown_bg = "-"
+        dirty_scene = true
+        cont()
+    }
+
+    vein jp_on() -> bool { return lang_jp }
+    vein set_jp(on: stone) -> void {
+        forge was = lang_jp
+        set_lang_jp(on != 0)
+        if (was != lang_jp) { oal.toast(tr("jp_titulo")) }
+    }
+
+    // ── video de abertura ────────────────────────────────────────────────
+    // O MOON. traz cada video duas vezes: snd/NOME.avi (Xvid/MPEG-4, sem
+    // decodificador em OFS) e snd/NOME_jp.avi (Microsoft Video 1 + PCM),
+    // com as mesmas imagens. Usa o primeiro que der para decodificar.
+    vein _video_open(file: obsidian) -> stone {
+        forge base = source + "/snd/" + tx.lower(file)
+        forge v = avi.open(base + ".avi")
+        if (v >= 0 && avi.supported(v)) { return v }
+        if (v >= 0) { avi.close(v) }
+        v = avi.open(base + "_jp.avi")
+        if (v >= 0 && avi.supported(v)) { return v }
+        if (v >= 0) {
+            oal.log("moon: video sem decodificador " + file + " (" + avi.codec(v) + ")")
+            avi.close(v)
+        } else {
+            oal.log("moon: video faltando " + file)
+        }
+        return -1
+    }
+
+    vein video_start(file: obsidian) -> void {
+        video_stop()
+        if (tx.len(file) == 0) { return }
+        forge v = _video_open(file)
+        if (v < 0) { return }
+        if (avi.width(v) != CW || avi.height(v) != CH) {
+            oal.log("moon: video com tamanho inesperado " + file)
+            avi.close(v)
+            return
+        }
+        vid = v
+        vid_shown = -1
+        fade_t0 = -1
+        vid_snd = false
+        if (avi.audio_format(v) == 1 && avi.audio_bits(v) == 16 && avi.audio_channels(v) >= 1 && avi.audio_channels(v) <= 2) {
+            forge pcm = avi.read_audio(v)
+            forge s = wav.from_pcm(pcm, avi.audio_bytes(v) / (2 * avi.audio_channels(v)), avi.audio_channels(v), avi.audio_rate(v))
+            if (s >= 0) {
+                audio.stop(audio.CH_MUSIC)
+                bgm_name = ""
+                audio.set_volume(audio.CH_EXTRA, cfg.vol_bgm)
+                audio.play(audio.CH_EXTRA, s, false)
+                vid_snd = audio.ok
+                vid_rate = avi.audio_rate(v)
+            }
+        }
+        vid_t0 = oal.now_ms
+        oal.log("moon: video " + file + " (" + avi.codec(v) + ")")
+        _video_tick()
+    }
+
+    vein video_stop() -> void {
+        if (vid < 0) { return }
+        avi.close(vid)
+        vid = -1
+        if (vid_snd) { audio.stop(audio.CH_EXTRA) }
+        vid_snd = false
+        shown_bg = "-"
+        dirty_scene = true
+        oal.refresh()
+    }
+
+    vein video_playing() -> bool { return vid >= 0 }
+
+    // Relogio do video = posicao do audio (sem audio, o relogio de parede).
+    vein _video_tick() -> void {
+        forge ms = oal.now_ms - vid_t0
+        if (vid_snd) { ms = (audio.position(audio.CH_EXTRA) * 1000) / vid_rate }
+        forge f = (ms * 1000) / avi.us_per_frame(vid)
+        forge n = avi.frames(vid)
+        forge ended = f >= n || (vid_snd && !audio.playing(audio.CH_EXTRA) && ms > 500)
+        if (ended) {
+            oal.log("moon: video terminou")
+            video_stop()
+            if (waiting == W_CLICK) { advance() }
+            return
+        }
+        if (f != vid_shown) {
+            avi.decode(vid, f, scene)
+            vid_shown = f
+            oal.redraw()
+        }
+    }
+
+    // ── save / load ──────────────────────────────────────────────────────
+    vein can_save() -> bool { return active && waiting != W_MENU && !tx.eq(vm.script_name, "INIT") }
+
+    vein state() -> stone {
+        forge st = vm.get_state()
+        if (lang_jp) { json.put_s(st, "lang", "ja") } else { json.put_s(st, "lang", "en") }
+        json.put_s(st, "chapter", json.gs(vm.scene, "chapter", ""))
+        forge bl = json.arr()
+        forge n = ofs_array_len(bl_text)
+        forge i = n - 40
+        if (i < 0) { i = 0 }
+        while (i < n) {
+            forge e = json.obj()
+            json.put_s(e, "speaker", ofs_array_get(bl_speaker, i))
+            json.put_s(e, "text", ofs_array_get(bl_text, i))
+            json.put_s(e, "voice", "")
+            json.push(bl, e)
+            i++
+        }
+        json.put(st, "backlog", bl)
+        json.put_s(st, "game", game_id)
+        return st
+    }
+
+    // miniatura: cena atual em img.* (RGBA)
+    vein thumb() -> stone {
+        forge t = img.new(CW, CH)
+        forge p = img.px(t)
+        forge i = 0
+        while (i < CW * CH) {
+            forge v = _rd(scene, i)
+            bx.pb(p, i * 4, (v >> 16) & 255)
+            bx.pb(p, i * 4 + 1, (v >> 8) & 255)
+            bx.pb(p, i * 4 + 2, v & 255)
+            bx.pb(p, i * 4 + 3, 255)
+            i++
+        }
+        return t
+    }
+
+    vein save_to(slot: obsidian) -> bool {
+        if (!can_save()) {
+            oal.toast(tr("qsave_nada"))
+            return false
+        }
+        forge m = json.mark()
+        forge t = thumb()
+        forge ok = save.save_slot(game_id, slot, state(), t)
+        _sys_save()
+        img.free(t)
+        json.release(m)
+        oal.image_forget(save.root + "/" + game_id + "/" + slot + ".png")
+        return ok
+    }
+
+    vein quick_save() -> void {
+        if (save_to(save.QUICK)) { oal.toast(tr("qsave")) }
+    }
+
+    vein restore(st: stone) -> bool {
+        video_stop()
+        forge jp = tx.eq(json.gs(st, "lang", "en"), "ja") && has_jp()
+        if (jp != lang_jp) {
+            lang_jp = jp
+            _forget_scripts()
+            vm.scripts_dir = _scripts_dir(jp)
+        }
+        if (!vm.set_state(st)) { return false }
+        bl_speaker = []
+        bl_text = []
+        forge c = json.first(json.get(st, "backlog"))
+        while (c >= 0) {
+            ofs_array_push(bl_speaker, json.gs(c, "speaker", ""))
+            ofs_array_push(bl_text, json.gs(c, "text", ""))
+            c = json.next(c)
+        }
+        waiting = W_NONE
+        shown_bg = "-"
+        audio.stop(audio.CH_VOICE)
+        forge bgm = json.gs(vm.scene, "bgm", "")
+        bgm_name = ""
+        if (tx.len(bgm) > 0) { play_bgm(bgm, json.gi(vm.scene, "bgm_loop", 1) != 0) } else { audio.stop(audio.CH_MUSIC) }
+        compose()
+        shown_bg = json.gs(vm.scene, "bg", "")
+        return true
+    }
+
+    vein load_from(slot: obsidian) -> bool {
+        forge st = save.load_slot(game_id, slot)
+        if (st < 0) {
+            oal.toast(tr("qload_nada"))
+            return false
+        }
+        if (!restore(st)) { return false }
+        cont()
+        return true
+    }
+
+    // ── backlog (texto unico, mais recente por ultimo) ───────────────────
+    vein backlog_text() -> obsidian {
+        forge n = ofs_array_len(bl_text)
+        if (n == 0) { return tr("backlog_vazio") }
+        forge s = ""
+        forge i = n - 80
+        if (i < 0) { i = 0 }
+        while (i < n) {
+            forge sp: obsidian = ofs_array_get(bl_speaker, i)
+            forge t: obsidian = ofs_array_get(bl_text, i)
+            if (tx.len(sp) > 0) { s = s + sp + ": " + t } else { s = s + t }
+            if (i < n - 1) { s = s + "\n\n" }
+            i++
+        }
+        return s
+    }
+}

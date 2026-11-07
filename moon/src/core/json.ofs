@@ -1,0 +1,555 @@
+// M.O.O.N — JSON (parser + escritor) em OFS puro.
+//
+// Valores vivem numa arvore de nos guardada em arrays paralelos (estilo
+// "struct of arrays"; nada de global tipada como monolith). Um valor e um
+// id (stone). -1 = ausente.
+//
+// Saida compativel com JSON.stringify do Godot 4: compacto sem espacos
+// ({"a":1,"b":[1,2]}) e, com indentacao, "chave": valor um por linha.
+//
+//   forge o = json.obj()
+//   json.put(o, "op", json.str("say"))
+//   json.gi(o, "addr", -1)          // inteiro com valor padrao
+//   json.stringify(o, "")           // texto
+
+attach {F:bytes.ofs}
+
+extern vein strtod(s: obsidian, endptr: *stone) -> crystal
+
+namespace json {
+    // tipos de no
+    forge K_NULL: stone = 0
+    forge K_FALSE: stone = 1
+    forge K_TRUE: stone = 2
+    forge K_INT: stone = 3
+    forge K_FLOAT: stone = 4
+    forge K_STR: stone = 5
+    forge K_ARR: stone = 6
+    forge K_OBJ: stone = 7
+
+    forge _kind: Array<stone> = []
+    forge _num: Array<stone> = []
+    forge _str: Array<obsidian> = []
+    forge _key: Array<obsidian> = []
+    forge _first: Array<stone> = []
+    forge _last: Array<stone> = []
+    forge _next: Array<stone> = []
+    forge _cnt: Array<stone> = []
+    forge error: obsidian = ""
+
+    vein _new(k: stone, n: stone, s: obsidian) -> stone {
+        ofs_array_push(_kind, k)
+        ofs_array_push(_num, n)
+        ofs_array_push(_str, s)
+        ofs_array_push(_key, "")
+        ofs_array_push(_first, -1)
+        ofs_array_push(_last, -1)
+        ofs_array_push(_next, -1)
+        ofs_array_push(_cnt, 0)
+        return ofs_array_len(_kind) - 1
+    }
+
+    // ── construtores ─────────────────────────────────────────────────────
+    vein nul() -> stone { return _new(K_NULL, 0, "") }
+    vein boolv(b: bool) -> stone {
+        if (b) { return _new(K_TRUE, 1, "") }
+        return _new(K_FALSE, 0, "")
+    }
+    vein int(v: stone) -> stone { return _new(K_INT, v, "") }
+    vein str(s: obsidian) -> stone { return _new(K_STR, 0, s) }
+    vein arr() -> stone { return _new(K_ARR, 0, "") }
+    vein obj() -> stone { return _new(K_OBJ, 0, "") }
+    vein float_raw(text: obsidian, trunc: stone) -> stone { return _new(K_FLOAT, trunc, text) }
+
+    // Marca/libera: tudo criado depois de mark() some com release(m).
+    vein mark() -> stone { return ofs_array_len(_kind) }
+    vein release(m: stone) -> void {
+        if (m >= ofs_array_len(_kind)) { return }
+        bx.arr_truncate(_kind, m)
+        bx.arr_truncate(_num, m)
+        bx.sarr_truncate(_str, m)
+        bx.sarr_truncate(_key, m)
+        bx.arr_truncate(_first, m)
+        bx.arr_truncate(_last, m)
+        bx.arr_truncate(_next, m)
+        bx.arr_truncate(_cnt, m)
+    }
+    vein node_count() -> stone { return ofs_array_len(_kind) }
+
+    // ── leitura ──────────────────────────────────────────────────────────
+    vein kind(id: stone) -> stone {
+        if (id < 0) { return -1 }
+        return ofs_array_get(_kind, id)
+    }
+    vein is_obj(id: stone) -> bool { return kind(id) == K_OBJ }
+    vein is_arr(id: stone) -> bool { return kind(id) == K_ARR }
+    vein is_str(id: stone) -> bool { return kind(id) == K_STR }
+    vein is_num(id: stone) -> bool {
+        forge k = kind(id)
+        return k == K_INT || k == K_FLOAT
+    }
+    vein count(id: stone) -> stone {
+        if (id < 0) { return 0 }
+        return ofs_array_get(_cnt, id)
+    }
+    vein first(id: stone) -> stone {
+        if (id < 0) { return -1 }
+        return ofs_array_get(_first, id)
+    }
+    vein next(id: stone) -> stone {
+        if (id < 0) { return -1 }
+        return ofs_array_get(_next, id)
+    }
+    vein key(id: stone) -> obsidian { return ofs_array_get(_key, id) }
+
+    // Valor inteiro (int(x) do GDScript: float trunca, bool 0/1, texto parse).
+    vein ival(id: stone) -> stone {
+        forge k = kind(id)
+        if (k == K_INT || k == K_FLOAT || k == K_TRUE || k == K_FALSE) { return ofs_array_get(_num, id) }
+        if (k == K_STR) { return tx.to_int(ofs_array_get(_str, id)) }
+        return 0
+    }
+    vein sval(id: stone) -> obsidian {
+        forge k = kind(id)
+        if (k == K_STR || k == K_FLOAT) { return ofs_array_get(_str, id) }
+        if (k == K_INT) { return tx.num(ofs_array_get(_num, id)) }
+        if (k == K_TRUE) { return "true" }
+        if (k == K_FALSE) { return "false" }
+        return ""
+    }
+
+    vein get(o: stone, k: obsidian) -> stone {
+        if (kind(o) != K_OBJ) { return -1 }
+        forge c: stone = ofs_array_get(_first, o)
+        while (c >= 0) {
+            forge ck: obsidian = ofs_array_get(_key, c)
+            if (tx.eq(ck, k)) { return c }
+            c = ofs_array_get(_next, c)
+        }
+        return -1
+    }
+    vein has(o: stone, k: obsidian) -> bool { return get(o, k) >= 0 }
+    vein gi(o: stone, k: obsidian, dflt: stone) -> stone {
+        forge v = get(o, k)
+        if (v < 0) { return dflt }
+        return ival(v)
+    }
+    vein gs(o: stone, k: obsidian, dflt: obsidian) -> obsidian {
+        forge v = get(o, k)
+        if (v < 0) { return dflt }
+        return sval(v)
+    }
+    vein at(a: stone, i: stone) -> stone {
+        forge c = first(a)
+        forge j = 0
+        while (c >= 0 && j < i) {
+            c = ofs_array_get(_next, c)
+            j++
+        }
+        return c
+    }
+    // Filhos num Array<stone> (acesso indexado O(1) depois).
+    vein items(a: stone) -> Array<stone> {
+        forge out: Array<stone> = []
+        forge c = first(a)
+        while (c >= 0) {
+            ofs_array_push(out, c)
+            c = ofs_array_get(_next, c)
+        }
+        return out
+    }
+
+    // ── escrita ──────────────────────────────────────────────────────────
+    vein _append(p: stone, v: stone) -> void {
+        forge l: stone = ofs_array_get(_last, p)
+        if (l < 0) {
+            ofs_array_set(_first, p, v)
+        } else {
+            ofs_array_set(_next, l, v)
+        }
+        ofs_array_set(_last, p, v)
+        ofs_array_set(_next, v, -1)
+        ofs_array_set(_cnt, p, ofs_array_get(_cnt, p) + 1)
+    }
+
+    vein push(a: stone, v: stone) -> stone {
+        ofs_array_set(_key, v, "")
+        _append(a, v)
+        return a
+    }
+
+    // Define/substitui a chave mantendo a posicao (ordem de insercao, como Dictionary).
+    vein put(o: stone, k: obsidian, v: stone) -> stone {
+        ofs_array_set(_key, v, k)
+        forge prev = -1
+        forge c: stone = ofs_array_get(_first, o)
+        while (c >= 0) {
+            forge ck: obsidian = ofs_array_get(_key, c)
+            if (tx.eq(ck, k)) {
+                forge nx: stone = ofs_array_get(_next, c)
+                ofs_array_set(_next, v, nx)
+                if (prev < 0) { ofs_array_set(_first, o, v) } else { ofs_array_set(_next, prev, v) }
+                if (ofs_array_get(_last, o) == c) { ofs_array_set(_last, o, v) }
+                return o
+            }
+            prev = c
+            c = ofs_array_get(_next, c)
+        }
+        _append(o, v)
+        return o
+    }
+    vein put_i(o: stone, k: obsidian, v: stone) -> stone { return put(o, k, int(v)) }
+    vein put_s(o: stone, k: obsidian, v: obsidian) -> stone { return put(o, k, str(v)) }
+
+    vein remove(o: stone, k: obsidian) -> void {
+        forge prev = -1
+        forge c: stone = ofs_array_get(_first, o)
+        while (c >= 0) {
+            forge nx: stone = ofs_array_get(_next, c)
+            forge ck: obsidian = ofs_array_get(_key, c)
+            if (tx.eq(ck, k)) {
+                if (prev < 0) { ofs_array_set(_first, o, nx) } else { ofs_array_set(_next, prev, nx) }
+                if (ofs_array_get(_last, o) == c) { ofs_array_set(_last, o, prev) }
+                ofs_array_set(_cnt, o, ofs_array_get(_cnt, o) - 1)
+                return
+            }
+            prev = c
+            c = nx
+        }
+    }
+
+    // Altera o valor de um no escalar no lugar.
+    vein set_int(id: stone, v: stone) -> void {
+        ofs_array_set(_kind, id, K_INT)
+        ofs_array_set(_num, id, v)
+    }
+
+    vein clone(id: stone) -> stone {
+        forge k = kind(id)
+        if (k < 0) { return -1 }
+        forge n = _new(k, ofs_array_get(_num, id), ofs_array_get(_str, id))
+        if (k == K_ARR || k == K_OBJ) {
+            forge c = first(id)
+            while (c >= 0) {
+                forge cc = clone(c)
+                ofs_array_set(_key, cc, ofs_array_get(_key, c))
+                _append(n, cc)
+                c = ofs_array_get(_next, c)
+            }
+        }
+        return n
+    }
+
+    // Copia raso de objeto (Dictionary.duplicate()).
+    vein dup(o: stone) -> stone {
+        forge n = obj()
+        forge c = first(o)
+        while (c >= 0) {
+            put(n, key(c), c_clone_shallow(c))
+            c = ofs_array_get(_next, c)
+        }
+        return n
+    }
+    vein c_clone_shallow(c: stone) -> stone { return clone(c) }
+
+    // ── parser ───────────────────────────────────────────────────────────
+    forge _s: stone = 0
+    forge _n: stone = 0
+    forge _p: stone = 0
+    forge _bad: bool = false
+
+    vein _c() -> stone {
+        if (_p >= _n) { return -1 }
+        return bx.gb(_s, _p)
+    }
+    vein _ws() -> void {
+        while (_p < _n) {
+            forge c = bx.gb(_s, _p)
+            if (c == 32 || c == 9 || c == 10 || c == 13) { _p++ } else { return }
+        }
+    }
+    vein _fail(msg: obsidian) -> stone {
+        if (!_bad) { error = msg + " em " + tx.num(_p) }
+        _bad = true
+        return -1
+    }
+    vein _hex(c: stone) -> stone {
+        if (c >= 48 && c <= 57) { return c - 48 }
+        if (c >= 97 && c <= 102) { return c - 87 }
+        if (c >= 65 && c <= 70) { return c - 55 }
+        return 0
+    }
+    vein _u4() -> stone {
+        forge v = 0
+        forge i = 0
+        while (i < 4) {
+            v = (v << 4) | _hex(_c())
+            _p++
+            i++
+        }
+        return v
+    }
+    vein _string() -> obsidian {
+        _p++
+        forge st = _p
+        // caminho rapido: sem escapes
+        while (_p < _n) {
+            forge c = bx.gb(_s, _p)
+            if (c == 34) {
+                forge r = tx.from_bytes(_s + st, _p - st)
+                _p++
+                return r
+            }
+            if (c == 92) { break }
+            _p++
+        }
+        forge b = sb.new()
+        sb.bytes(b, _s + st, _p - st)
+        while (_p < _n) {
+            forge c2 = bx.gb(_s, _p)
+            if (c2 == 34) {
+                _p++
+                forge out = sb.str(b)
+                sb.drop(b)
+                return out
+            }
+            if (c2 == 92) {
+                _p++
+                forge e = _c()
+                _p++
+                if (e == 110) { sb.byte(b, 10) }
+                else if (e == 116) { sb.byte(b, 9) }
+                else if (e == 114) { sb.byte(b, 13) }
+                else if (e == 98) { sb.byte(b, 8) }
+                else if (e == 102) { sb.byte(b, 12) }
+                else if (e == 118) { sb.byte(b, 11) }
+                else if (e == 117) {
+                    forge cp = _u4()
+                    if (cp >= 55296 && cp <= 56319 && _c() == 92) {
+                        _p++
+                        _p++
+                        forge lo = _u4()
+                        cp = 65536 + ((cp - 55296) << 10) + (lo - 56320)
+                    }
+                    tx.utf8(b, cp)
+                } else { sb.byte(b, e) }
+            } else {
+                sb.byte(b, c2)
+                _p++
+            }
+        }
+        sb.drop(b)
+        _fail("string sem fim")
+        return ""
+    }
+    vein _number() -> stone {
+        forge st = _p
+        forge isf = false
+        if (_c() == 45) { _p++ }
+        while (_p < _n) {
+            forge c = bx.gb(_s, _p)
+            if (c >= 48 && c <= 57) { _p++ }
+            else if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45) {
+                isf = true
+                _p++
+            } else { break }
+        }
+        forge t = tx.from_bytes(_s + st, _p - st)
+        if (isf) {
+            forge d: crystal = strtod(t, null)
+            return float_raw(t, d as stone)
+        }
+        return int(tx.to_int(t))
+    }
+    vein _lit(w: obsidian) -> bool {
+        forge n = tx.len(w)
+        if (_p + n > _n) { return false }
+        forge i = 0
+        while (i < n) {
+            if (bx.gb(_s, _p + i) != tx.at(w, i)) { return false }
+            i++
+        }
+        _p = _p + n
+        return true
+    }
+    vein _value() -> stone {
+        _ws()
+        forge c = _c()
+        if (c == 123) {
+            _p++
+            forge o = obj()
+            _ws()
+            if (_c() == 125) {
+                _p++
+                return o
+            }
+            while (!_bad) {
+                _ws()
+                if (_c() != 34) { return _fail("esperava chave") }
+                forge k = _string()
+                _ws()
+                if (_c() != 58) { return _fail("esperava ':'") }
+                _p++
+                forge v = _value()
+                if (v < 0) { return -1 }
+                ofs_array_set(_key, v, k)
+                _append(o, v)
+                _ws()
+                forge d = _c()
+                _p++
+                if (d == 125) { return o }
+                if (d != 44) { return _fail("esperava ',' ou '}'") }
+            }
+            return -1
+        }
+        if (c == 91) {
+            _p++
+            forge a = arr()
+            _ws()
+            if (_c() == 93) {
+                _p++
+                return a
+            }
+            while (!_bad) {
+                forge v2 = _value()
+                if (v2 < 0) { return -1 }
+                _append(a, v2)
+                _ws()
+                forge d2 = _c()
+                _p++
+                if (d2 == 93) { return a }
+                if (d2 != 44) { return _fail("esperava ',' ou ']'") }
+            }
+            return -1
+        }
+        if (c == 34) { return str(_string()) }
+        if (c == 45 || (c >= 48 && c <= 57)) { return _number() }
+        if (_lit("true")) { return boolv(true) }
+        if (_lit("false")) { return boolv(false) }
+        if (_lit("null")) { return nul() }
+        return _fail("valor invalido")
+    }
+
+    vein parse_bytes(p: stone, n: stone) -> stone {
+        _s = p
+        _n = n
+        _p = 0
+        _bad = false
+        error = ""
+        // BOM UTF-8
+        if (n >= 3 && bx.gb(p, 0) == 239 && bx.gb(p, 1) == 187 && bx.gb(p, 2) == 191) { _p = 3 }
+        forge v = _value()
+        if (_bad) { return -1 }
+        return v
+    }
+    vein parse(text: obsidian) -> stone {
+        return parse_bytes(text as stone, tx.len(text))
+    }
+    vein load(path: obsidian) -> stone {
+        forge b = bx.read_file(path)
+        if (b == 0) {
+            error = "nao abriu " + path
+            return -1
+        }
+        forge v = parse_bytes(b, bx.last_len)
+        bx.free(b)
+        return v
+    }
+
+    // ── escritor ─────────────────────────────────────────────────────────
+    vein _esc(b: stone, s: obsidian) -> void {
+        sb.byte(b, 34)
+        forge n = tx.len(s)
+        forge st = 0
+        forge i = 0
+        while (i < n) {
+            forge c = bx.gb(s as stone, i)
+            forge e = 0
+            if (c == 34) { e = 34 }
+            else if (c == 92) { e = 92 }
+            else if (c == 10) { e = 110 }
+            else if (c == 13) { e = 114 }
+            else if (c == 9) { e = 116 }
+            else if (c == 8) { e = 98 }
+            else if (c == 12) { e = 102 }
+            else if (c == 11) { e = 118 }
+            if (e != 0) {
+                sb.bytes(b, (s as stone) + st, i - st)
+                sb.byte(b, 92)
+                sb.byte(b, e)
+                st = i + 1
+            }
+            i++
+        }
+        sb.bytes(b, (s as stone) + st, n - st)
+        sb.byte(b, 34)
+    }
+    vein _ind(b: stone, ind: obsidian, lvl: stone) -> void {
+        forge i = 0
+        while (i < lvl) {
+            sb.add(b, ind)
+            i++
+        }
+    }
+    vein write(b: stone, id: stone, ind: obsidian, lvl: stone) -> void {
+        forge k = kind(id)
+        forge pretty = tx.len(ind) > 0
+        if (k == K_NULL || k < 0) { sb.add(b, "null") }
+        else if (k == K_TRUE) { sb.add(b, "true") }
+        else if (k == K_FALSE) { sb.add(b, "false") }
+        else if (k == K_INT) { sb.num(b, ofs_array_get(_num, id)) }
+        else if (k == K_FLOAT) { sb.add(b, ofs_array_get(_str, id)) }
+        else if (k == K_STR) { _esc(b, ofs_array_get(_str, id)) }
+        else {
+            forge open = 91
+            forge close = 93
+            if (k == K_OBJ) {
+                open = 123
+                close = 125
+            }
+            forge c = first(id)
+            if (c < 0) {
+                sb.byte(b, open)
+                sb.byte(b, close)
+                return
+            }
+            sb.byte(b, open)
+            if (pretty) { sb.byte(b, 10) }
+            forge firstc = true
+            while (c >= 0) {
+                if (!firstc) {
+                    sb.byte(b, 44)
+                    if (pretty) { sb.byte(b, 10) }
+                }
+                firstc = false
+                if (pretty) { _ind(b, ind, lvl + 1) }
+                if (k == K_OBJ) {
+                    _esc(b, ofs_array_get(_key, c))
+                    sb.byte(b, 58)
+                    if (pretty) { sb.byte(b, 32) }
+                }
+                write(b, c, ind, lvl + 1)
+                c = ofs_array_get(_next, c)
+            }
+            if (pretty) {
+                sb.byte(b, 10)
+                _ind(b, ind, lvl)
+            }
+            sb.byte(b, close)
+        }
+    }
+    vein stringify(id: stone, ind: obsidian) -> obsidian {
+        forge b = sb.new()
+        write(b, id, ind, 0)
+        forge s = sb.str(b)
+        sb.drop(b)
+        return s
+    }
+    vein save(path: obsidian, id: stone, ind: obsidian) -> bool {
+        forge b = sb.new()
+        write(b, id, ind, 0)
+        forge ok = sb.write(b, path)
+        sb.drop(b)
+        return ok
+    }
+}

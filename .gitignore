@@ -1,0 +1,55 @@
+# M.O.O.N — .gitignore
+# O repositório guarda só código-fonte, scripts, docs e prints limpos (docs/screenshots/).
+# Binários gerados (APK, motores, pacotes) saem dos scripts de build ou do CI.
+
+# ── Legado e dados de jogos (não versionar; dados com direitos autorais) ──
+/batch/
+/Laucher Tarja Preta Games/
+
+# ── Mapa do graphify (gerado) ──
+/graphify-out/
+
+# ── App M.O.O.N: saídas de build ──
+/moon/build/
+/moon/bin/
+
+# Prints de acompanhamento do desenvolvimento (têm arte de jogos de terceiros).
+# As imagens do repositório ficam em /docs/screenshots/ (prints limpos).
+/moon/prints/
+
+# ── Plugins: saídas de build, motores compilados e pacotes ──
+/plugins/dist/
+/plugins/*/build/
+/plugins/*/out/
+/plugins/*/pack/build/
+/plugins/*/adaptador/build/
+/plugins/windows/third_party/
+*.moonpack
+*.apk
+*.aab
+*.so
+*.dex
+*.tpz
+*.idsig
+
+# Chaves de assinatura nunca vão para o git
+*.keystore
+*.jks
+
+# ── Temporários de editor e sistema ──
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+__pycache__/
+
+# ── Planos, estudos e notas de agentes (privados) ──
+# Público: só o README central e o CHANGELOG.
+*.md
+!/README.md
+!/CHANGELOG.md
+
+# Temporários locais e config de ferramentas
+/.tmp
+/.graphifyignore

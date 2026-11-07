@@ -1,0 +1,350 @@
+// M.O.O.N — jogos HTML5 (RPG Maker MV/MZ, TyranoBuilder) numa WebView em tela cheia.
+// Tudo via JNI no stdlib android_webview.ofs (nenhum Java do M.O.O.N).
+//
+// Abrir: le o index.html do jogo, injeta no inicio um <script> com
+//   window.__MOON = {engine, game, saves:{chave: valor}}  (os arquivos de
+//   /sdcard/MOON/saves/<motor>/<jogo>/) + o shim do plugin instalado, e carrega
+//   com loadDataWithBaseURL("file:///<pasta do jogo>/") — a pasta do jogo nao e alterada.
+// Saves: o shim avisa mudancas pelo document.title; a cada ~300 ms olhamos o
+// titulo, pedimos o despejo (MOON.dump) e gravamos so os arquivos que mudaram.
+// Sair: botao voltar fecha a WebView (poll()) -> volta para os detalhes.
+
+attach {F:plugins.ofs}
+attach {F:saves.ofs}
+attach {android_webview}
+
+namespace web {
+    forge active: bool = false
+    forge game: stone = -1
+    forge motor: obsidian = ""
+    forge gid: obsidian = ""
+    forge sdir: obsidian = ""
+    forge last_rev: stone = -1
+    forge next_poll: stone = 0
+    forge next_ping: stone = 0
+    forge last_sync: obsidian = ""
+    forge saved_files: stone = 0
+    forge title_seen: obsidian = ""
+    forge error: obsidian = ""
+    forge asm_id: stone = -1           // buffer do despejo em pedacos
+    forge asm_exp: stone = 0
+    forge asm_t: stone = 0
+
+    // ── chave <-> nome de arquivo ────────────────────────────────────────
+    // letras, numeros, espaco . _ - ficam; o resto vira %XX. Extensao .sav.
+    vein key_to_file(k: obsidian) -> obsidian {
+        forge b = sb.new()
+        forge n = tx.len(k)
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(k, i)
+            forge ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 32 || c == 46 || c == 95 || c == 45
+            if (ok) {
+                sb.byte(b, c)
+            } else {
+                sb.byte(b, 37)
+                sb.add(b, tx.hex2(c))
+            }
+            i++
+        }
+        forge s = sb.str(b)
+        sb.drop(b)
+        if (tx.starts(s, ".")) { s = "%2E" + tx.sub(s, 1, tx.len(s) - 1) }
+        return s + ".sav"
+    }
+    vein _hexv(c: stone) -> stone {
+        if (c >= 48 && c <= 57) { return c - 48 }
+        if (c >= 97 && c <= 102) { return c - 87 }
+        if (c >= 65 && c <= 70) { return c - 55 }
+        return 0
+    }
+    vein file_to_key(f: obsidian) -> obsidian {
+        forge n = tx.len(f) - 4
+        forge b = sb.new()
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(f, i)
+            if (c == 37 && i + 2 < n) {
+                sb.byte(b, _hexv(tx.at(f, i + 1)) * 16 + _hexv(tx.at(f, i + 2)))
+                i = i + 3
+            } else {
+                sb.byte(b, c)
+                i++
+            }
+        }
+        forge s = sb.str(b)
+        sb.drop(b)
+        return s
+    }
+
+    // ── texto ────────────────────────────────────────────────────────────
+    vein _index_of(hay: obsidian, needle: obsidian, from: stone) -> stone {
+        forge n = tx.len(hay)
+        forge m = tx.len(needle)
+        if (m == 0) { return from }
+        forge c0 = tx.at(needle, 0)
+        forge i = from
+        while (i + m <= n) {
+            i = tx.find(hay, c0, i)
+            if (i < 0 || i + m > n) { return -1 }
+            forge ok = true
+            forge k = 1
+            while (k < m) {
+                if (tx.at(hay, i + k) != tx.at(needle, k)) {
+                    ok = false
+                    break
+                }
+                k++
+            }
+            if (ok) { return i }
+            i++
+        }
+        return -1
+    }
+
+    // prefixo do canal, igual ao de common/moon_web.js
+    vein _pfx() -> obsidian { return "@MOON@ " }
+
+    // decodifica %XX (encodeURIComponent do shim)
+    vein uri_decode(f: obsidian) -> obsidian {
+        if (tx.find(f, 37, 0) < 0) { return f }
+        forge n = tx.len(f)
+        forge b = sb.new()
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(f, i)
+            if (c == 37 && i + 2 < n) {
+                sb.byte(b, _hexv(tx.at(f, i + 1)) * 16 + _hexv(tx.at(f, i + 2)))
+                i = i + 3
+            } else {
+                sb.byte(b, c)
+                i++
+            }
+        }
+        forge s = sb.str(b)
+        sb.drop(b)
+        return s
+    }
+
+    // "</" -> "<\/" (para nao fechar o <script> inline; valido dentro de strings JS)
+    vein _esc_script(s: obsidian) -> obsidian {
+        if (_index_of(s, "</", 0) < 0) { return s }
+        forge b = sb.new()
+        forge n = tx.len(s)
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(s, i)
+            if (c == 60 && i + 1 < n && tx.at(s, i + 1) == 47) {
+                sb.add(b, "<\\/")
+                i = i + 2
+            } else {
+                sb.byte(b, c)
+                i++
+            }
+        }
+        forge out = sb.str(b)
+        sb.drop(b)
+        return out
+    }
+
+    // pasta onde esta o index.html do jogo
+    vein html_root(dir: obsidian) -> obsidian {
+        if (bx.exists(dir + "/www/index.html")) { return dir + "/www" }
+        if (bx.exists(dir + "/index.html")) { return dir }
+        return ""
+    }
+
+    // saves do jogo -> objeto JS {"chave":"valor"}
+    vein _saves_json() -> obsidian {
+        forge m = json.mark()
+        forge o = json.obj()
+        forge fs = bx.list_dir(sdir, 1)
+        forge i = 0
+        while (i < ofs_array_len(fs)) {
+            forge f: obsidian = ofs_array_get(fs, i)
+            if (tx.ends(f, ".sav")) {
+                json.put_s(o, file_to_key(f), bx.read_text(sdir + "/" + f))
+            }
+            i++
+        }
+        forge s = json.stringify(o, "")
+        json.release(m)
+        return s
+    }
+
+    // injeta o script logo depois de <head ...>; sem <head>, no inicio
+    vein inject(html: obsidian, script: obsidian) -> obsidian {
+        forge low = tx.lower(html)
+        forge tag = "<script>" + script + "</script>"
+        forge h = _index_of(low, "<head", 0)
+        if (h >= 0) {
+            forge gt = tx.find(html, 62, h)
+            if (gt > 0) { return tx.sub(html, 0, gt + 1) + tag + tx.sub(html, gt + 1, tx.len(html) - gt - 1) }
+        }
+        forge hh = _index_of(low, "<html", 0)
+        if (hh >= 0) {
+            forge gt2 = tx.find(html, 62, hh)
+            if (gt2 > 0) { return tx.sub(html, 0, gt2 + 1) + tag + tx.sub(html, gt2 + 1, tx.len(html) - gt2 - 1) }
+        }
+        return tag + html
+    }
+
+    // ── abrir / fechar ───────────────────────────────────────────────────
+    // i: indice na biblioteca; pk: indice do plugin instalado (plg.i_*).
+    vein start(i: stone, pk: stone) -> bool {
+        error = ""
+        if (active) { stop() }
+        forge engine: obsidian = ofs_array_get(lib.g_engine, i)
+        forge dir: obsidian = ofs_array_get(lib.g_src, i)
+        forge hr = html_root(dir)
+        if (tx.len(hr) == 0) {
+            error = tr("web_sem_index")
+            return false
+        }
+        forge shim_path: obsidian = ofs_array_get(plg.i_dir, pk) + "/" + ofs_array_get(plg.i_entry, pk)
+        forge shim = bx.read_text(shim_path)
+        if (tx.len(shim) == 0) {
+            error = tr("web_sem_shim")
+            return false
+        }
+        game = i
+        motor = sv.motor_key(engine)
+        gid = ofs_array_get(lib.g_id, i)
+        sdir = sv.game_dir(motor, gid)
+        bx.mkdir_p(sdir)
+        forge html = bx.read_text(hr + "/index.html")
+        forge sj = _saves_json()
+        forge pre = "window.__MOON=" + _esc_script("{\"engine\":\"" + motor + "\",\"game\":\"" + gid + "\",\"saves\":" + sj + "};") + "\n"
+        forge page = inject(html, pre + _esc_script(shim))
+        android.set_orientation(android.ORIENT_REQ_SENSOR_LANDSCAPE)
+        if (!webview.open("file://" + hr + "/", page)) {
+            error = webview.last_error
+            app_restore_orientation()
+            return false
+        }
+        active = true
+        last_rev = 0
+        asm_id = -1
+        next_poll = 0
+        next_ping = 0
+        saved_files = 0
+        oal.set_animating(true)
+        oal.log("moon: webgame " + engine + " " + gid + " plugin " + ofs_array_get(plg.i_id, pk))
+        return true
+    }
+
+    // despejo -> arquivos: grava os que mudaram, apaga os que sumiram
+    vein sync_dump(payload: obsidian) -> void {
+        forge m = json.mark()
+        forge o = json.parse(payload)
+        if (json.is_obj(o)) {
+            forge keep: Array<obsidian> = []
+            forge c = json.first(o)
+            while (c >= 0) {
+                forge f = key_to_file(json.key(c))
+                forge v = tx.copy(json.sval(c))
+                ofs_array_push(keep, f)
+                forge cur = bx.read_text(sdir + "/" + f)
+                if (!bx.exists(sdir + "/" + f) || !tx.eq(cur, v)) {
+                    if (bx.exists(sdir + "/" + f)) { bx.copy_file(sdir + "/" + f, sdir + "/" + f + ".antes") }
+                    bx.write_text(sdir + "/" + f, v)
+                    saved_files++
+                }
+                c = json.next(c)
+            }
+            // chaves removidas pelo jogo
+            forge fs = bx.list_dir(sdir, 1)
+            forge i = 0
+            while (i < ofs_array_len(fs)) {
+                forge f2: obsidian = ofs_array_get(fs, i)
+                if (tx.ends(f2, ".sav")) {
+                    forge found = false
+                    forge k = 0
+                    while (k < ofs_array_len(keep)) {
+                        if (tx.eq(ofs_array_get(keep, k), f2)) { found = true }
+                        k++
+                    }
+                    if (!found) { bx.delete(sdir + "/" + f2) }
+                }
+                i++
+            }
+        }
+        json.release(m)
+    }
+
+    // um passo por quadro (barato: so olha o titulo a cada ~300 ms)
+    vein tick() -> void {
+        if (!active) { return }
+        if (!webview.poll()) {
+            stop()
+            return
+        }
+        forge now = oal.now_ms
+        if (asm_id >= 0 && now - asm_t > 3000) {
+            sb.drop(asm_id)
+            asm_id = -1
+        }
+        if (asm_id < 0 && now < next_poll) { return }
+        next_poll = now + 300
+        forge t = webview.title()
+        forge pfx = _pfx()
+        if (!tx.starts(t, pfx)) {
+            if (now > next_ping) {
+                next_ping = now + 2000
+                webview.eval("window.MOON&&MOON.ping()")
+            }
+            return
+        }
+        forge body = tx.sub(t, tx.len(pfx), tx.len(t) - tx.len(pfx))
+        forge kind = tx.at(body, 0)
+        if (kind == 88) {
+            stop()
+            return
+        }
+        if (kind == 77) {
+            forge rev = tx.to_int(tx.sub(body, 1, tx.len(body) - 1))
+            if (rev != last_rev) { webview.eval("MOON.dump()") }
+        } else if (kind == 68) {
+            _chunk(body)
+        }
+    }
+
+    // "D<rev>.<i>.<n>|<pedaco>"
+    vein _chunk(body: obsidian) -> void {
+        forge p1 = tx.find(body, 46, 0)
+        forge p2 = tx.find(body, 46, p1 + 1)
+        forge bar = tx.find(body, 124, p2 + 1)
+        if (p1 < 0 || p2 < 0 || bar < 0) { return }
+        forge rev = tx.to_int(tx.sub(body, 1, p1 - 1))
+        forge i = tx.to_int(tx.sub(body, p1 + 1, p2 - p1 - 1))
+        forge n = tx.to_int(tx.sub(body, p2 + 1, bar - p2 - 1))
+        if (i == 0 && asm_id < 0) {
+            asm_id = sb.new()
+            asm_exp = 0
+        }
+        if (asm_id < 0 || i != asm_exp) { return }
+        sb.add(asm_id, tx.sub(body, bar + 1, tx.len(body) - bar - 1))
+        asm_exp++
+        asm_t = oal.now_ms
+        if (asm_exp >= n) {
+            forge payload = sb.str(asm_id)
+            sb.drop(asm_id)
+            asm_id = -1
+            last_rev = rev
+            sync_dump(uri_decode(payload))
+            webview.eval("MOON.ack()")
+        } else {
+            webview.eval("MOON.next()")
+        }
+    }
+
+    vein stop() -> void {
+        if (!active) { return }
+        active = false
+        webview.close()
+        oal.set_animating(false)
+        app_restore_orientation()
+        oal.log("moon: webgame fechado, " + tx.num(saved_files) + " arquivo(s) de save gravados")
+        oal.refresh()
+    }
+}

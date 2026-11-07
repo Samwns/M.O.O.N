@@ -1,0 +1,50 @@
+// M.O.O.N — Fase 0: prova de que OFS roda num APK Android, em OFS puro.
+// Pinta um retangulo centralizado (render em software no ANativeWindow),
+// troca a cor a cada toque, se ajusta a rotacao e sai com o botao voltar.
+// Sem nenhum .c: a NativeActivity e atendida pelo stdlib android.ofs.
+
+attach {F:android.ofs}
+
+forge _colors: Array<stone> = [16737792, 3381759, 6750054, 16763955, 13369548]
+forge color_idx: stone = 0
+
+vein draw() -> void {
+    if (!android.lock()) {
+        android.log_tag("moon", "ANativeWindow_lock falhou")
+        return
+    }
+    forge w = android.buf_w
+    forge h = android.buf_h
+    android.fill_rect(0, 0, w, h, 1052704)
+    forge rw = w * 2 / 3
+    forge rh = h / 3
+    forge c: stone = ofs_array_get(_colors, color_idx)
+    android.fill_rect((w - rw) / 2, (h - rh) / 2, rw, rh, c)
+    // faixa no topo: larga em paisagem, estreita em retrato
+    forge band = w / 4
+    if (android.orientation == android.ORIENT_LANDSCAPE) { band = w / 2 }
+    android.fill_rect(0, 0, band, h / 20, 16777215)
+    android.unlock_post()
+    android.log_tag("moon", "frame " + ofs_stone_to_obsidian(w) + "x" + ofs_stone_to_obsidian(h) + " cor=" + ofs_stone_to_obsidian(color_idx))
+}
+
+vein android_event(ev: stone) -> void {
+    if (ev == android.EV_CREATE) {
+        color_idx = 0
+        android.log_tag("moon", "OFS puro: ANativeActivity_onCreate (sdk " + ofs_stone_to_obsidian(android.sdk_version) + ") dados=" + android.internal_data_path())
+    }
+    if (ev == android.EV_FRAME) { draw() }
+    if (ev == android.EV_TOUCH_DOWN) {
+        color_idx = (color_idx + 1) % ofs_array_len(_colors)
+        android.log_tag("moon", "toque em " + ofs_stone_to_obsidian(android.touch_x) + "," + ofs_stone_to_obsidian(android.touch_y) + " -> cor " + ofs_stone_to_obsidian(color_idx))
+        android.request_frame()
+    }
+    if (ev == android.EV_ROTATE) {
+        android.log_tag("moon", "rotacao -> " + ofs_stone_to_obsidian(android.win_w) + "x" + ofs_stone_to_obsidian(android.win_h))
+    }
+    if (ev == android.EV_BACK) {
+        android.log_tag("moon", "voltar: finish()")
+        android.finish()
+    }
+    if (ev == android.EV_DESTROY) { android.log_tag("moon", "onDestroy") }
+}

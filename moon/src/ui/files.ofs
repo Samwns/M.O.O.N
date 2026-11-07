@@ -1,0 +1,132 @@
+// M.O.O.N — gerenciador de arquivos interno: navegar no armazenamento,
+// ver o motor detectado da pasta, importar dali ou instalar um patch .json.
+// Nao apaga nem move nada.
+
+attach {F:lib.ofs}
+
+namespace arq {
+    forge cur: obsidian = "/storage/emulated/0"
+    forge e_name: Array<obsidian> = []
+    forge e_dir: Array<stone> = []
+    forge e_info: Array<obsidian> = []
+    forge e_icon: Array<obsidian> = []
+    forge mode: stone = 0              // 0 navegar/importar, 1 escolher patch
+    forge here_engine: obsidian = ""
+    forge here_label: obsidian = ""
+    forge size_text: obsidian = ""
+    forge measuring: bool = false
+    forge roots: Array<obsidian> = []
+    forge root_names: Array<obsidian> = []
+
+    vein icon_for(name: obsidian, is_dir: bool) -> obsidian {
+        if (is_dir) { return "folder" }
+        forge e = lib.ext_of(name)
+        if (tx.eq(e, "png") || tx.eq(e, "jpg") || tx.eq(e, "jpeg") || tx.eq(e, "webp") || tx.eq(e, "bmp") || tx.eq(e, "tgf")) { return "image" }
+        if (tx.eq(e, "wav") || tx.eq(e, "ogg") || tx.eq(e, "mp3") || tx.eq(e, "opus")) { return "volume" }
+        if (tx.eq(e, "exe") || tx.eq(e, "dll")) { return "windows" }
+        if (tx.eq(e, "moonpack") || tx.eq(e, "zip")) { return "plugins" }
+        if (tx.eq(e, "rpa") || tx.eq(e, "rpy") || tx.eq(e, "rpyc")) { return "renpy" }
+        if (tx.eq(e, "lst") || tx.eq(e, "snx")) { return "moon" }
+        if (tx.eq(e, "avi") || tx.eq(e, "mp4") || tx.eq(e, "ogv")) { return "play" }
+        return "file"
+    }
+
+    vein open(dir: obsidian) -> void {
+        cur = dir
+        size_text = ""
+        measuring = false
+        e_name = []
+        e_dir = []
+        e_info = []
+        e_icon = []
+        here_engine = lib.detect(dir)
+        here_label = ""
+        if (tx.len(here_engine) > 0) {
+            here_label = tr("arq_detectado") + ": " + lib.engine_label(here_engine, lib.d_engver) + " — " + lib.d_name
+        } else {
+            here_label = tr("arq_nenhum")
+        }
+        forge dirs = bx.list_dir(dir, 2)
+        forge i = 0
+        while (i < ofs_array_len(dirs)) {
+            forge d: obsidian = ofs_array_get(dirs, i)
+            if (!tx.starts(d, ".")) {
+                ofs_array_push(e_name, d)
+                ofs_array_push(e_dir, 1)
+                forge eng = lib.detect(dir + "/" + d)
+                if (tx.len(eng) > 0) {
+                    ofs_array_push(e_info, tr("pasta_jogo") + " · " + lib.engine_label(eng, lib.d_engver))
+                    ofs_array_push(e_icon, lib.engine_icon(eng))
+                } else {
+                    ofs_array_push(e_info, tr("pasta"))
+                    ofs_array_push(e_icon, "folder")
+                }
+            }
+            i++
+        }
+        forge files = bx.list_dir(dir, 1)
+        i = 0
+        while (i < ofs_array_len(files)) {
+            forge f: obsidian = ofs_array_get(files, i)
+            if (!tx.starts(f, ".")) {
+                ofs_array_push(e_name, f)
+                ofs_array_push(e_dir, 0)
+                ofs_array_push(e_info, lib.human_size(lib.file_size(dir + "/" + f)))
+                ofs_array_push(e_icon, icon_for(f, false))
+            }
+            i++
+        }
+    }
+
+    vein up() -> void {
+        forge p = tx.dir_name(cur)
+        if (tx.len(p) < 2 || tx.eq(cur, "/storage/emulated/0")) { return }
+        open(p)
+    }
+
+    vein entries_count() -> stone { return ofs_array_len(e_name) }
+    vein entries_nome(i: stone) -> obsidian { return ofs_array_get(e_name, i) }
+    vein entries_info(i: stone) -> obsidian { return ofs_array_get(e_info, i) }
+    vein entries_icone(i: stone) -> obsidian { return ofs_array_get(e_icon, i) }
+    vein is_dir(i: stone) -> bool { return ofs_array_get(e_dir, i) == 1 }
+    vein full(i: stone) -> obsidian { return cur + "/" + ofs_array_get(e_name, i) }
+
+    vein roots_count() -> stone { return ofs_array_len(roots) }
+    vein roots_nome(i: stone) -> obsidian { return ofs_array_get(root_names, i) }
+    vein roots_path(i: stone) -> obsidian { return ofs_array_get(roots, i) }
+
+    vein title() -> obsidian {
+        forge t = cur
+        if (tx.starts(t, "/storage/emulated/0")) { t = "/sdcard" + tx.sub(t, 19, tx.len(t) - 19) }
+        return t
+    }
+
+    vein info() -> obsidian {
+        forge s = tx.num(entries_count()) + " " + tr("arq_itens")
+        if (tx.len(size_text) > 0) { s = s + " · " + size_text }
+        if (mode == 1) { s = s + "\n" + tr("arq_patch") }
+        if (mode == 2) { s = s + "\n" + tr("pl_escolher_pack") }
+        return s
+    }
+
+    vein measure() -> void {
+        lib.size_start(cur)
+        measuring = true
+        size_text = tr("imp_tamanho") + "…"
+        oal.set_animating(true)
+    }
+
+    // passo do calculo de tamanho (chamado por quadro)
+    vein step() -> void {
+        if (!measuring) { return }
+        if (lib.size_step(300)) {
+            measuring = false
+            size_text = tr("tamanho") + ": " + lib.human_size(lib.sz_total) + " (" + tx.num(lib.sz_files) + ")"
+            oal.set_animating(false)
+            oal.refresh()
+        } else {
+            size_text = tr("imp_tamanho") + "… " + lib.human_size(lib.sz_total)
+            oal.refresh()
+        }
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "nome": "RPG Maker",
+  "motor": "rpgm",
+  "versoes_motor": ["mv-1.6.2", "mv-1.6.1", "mz-1.8.0"],
+  "versao": "1.0.0",
+  "min_moon": "0.3.0",
+  "tipo": "webview",
+  "fontes": ["../common/moon_web.js", "shim.js"],
+  "entrada": "shim.js"
+}

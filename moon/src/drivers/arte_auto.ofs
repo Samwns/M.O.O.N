@@ -1,0 +1,431 @@
+// M.O.O.N — capa, icone e nome automaticos de jogos Ren'Py e Godot (sem UI).
+//
+// Ren'Py (arte.renpy(pasta, saida)):
+//   icone: game/gui/window_icon.png, icon.png, game/icon.png (soltos); depois dentro
+//          dos game/*.rpa: gui/window_icon.png; depois presplash_foreground/background.png
+//   capa:  o icone; sem icone, game/gui/main_menu.png (solto ou no .rpa)
+//   .rpa (RPA-3.0/2.0): "RPA-3.0 <offset hex> <chave hex>\n"; no offset fica o indice
+//   (zlib + pickle: {nome: [(offset^chave, tamanho^chave, prefixo)]}). So o indice e a
+//   entrada pedida sao lidos (o images.rpa do Hornycraft tem 3,2 GB).
+//   O pickle nao e executado: procura-se o nome (SHORT_BINUNICODE/BINUNICODE) e
+//   le-se a tupla logo depois (]  ( int int ...).
+//   Nome/versao: o lib.detect ja le config.name/config.version do options.rpy solto;
+//   quando so ha .rpyc (AST em pickle), fica o nome da pasta.
+//
+// Godot (arte.godot_info(pck) / arte.godot(pck, saida)):
+//   project.binary (ECFG) do .pck: application/config/name, /version, /icon.
+//   Icone: o arquivo do pck se for .png; senao o .ctex importado (via <icone>.import)
+//   se trouxer PNG dentro; WebP/SVG/JPEG nao tem decodificador no OFS: fica o icone
+//   padrao do motor.
+//
+// So PNG vira capa (o png.ofs e o unico decodificador de imagem).
+
+attach {F:../core/bytes.ofs}
+attach {F:godot_detect.ofs}
+attach {png}
+
+extern vein ofs_str_char_at(s: obsidian, idx: stone) -> stone
+
+namespace arte {
+    forge icone: obsidian = ""
+    forge capa: obsidian = ""
+    forge nome: obsidian = ""
+    forge versao: obsidian = ""
+
+    vein _png_ok(path: obsidian) -> bool {
+        forge b = bx.read_at(path, 0, 8)
+        if (b == 0) { return false }
+        forge ok = bx.last_len == 8 && bx.gb(b, 0) == 137 && bx.gb(b, 1) == 80 && bx.gb(b, 2) == 78 && bx.gb(b, 3) == 71
+        bx.free(b)
+        return ok
+    }
+
+    vein _first_png(cands: Array<obsidian>) -> obsidian {
+        forge i = 0
+        while (i < ofs_array_len(cands)) {
+            forge p: obsidian = ofs_array_get(cands, i)
+            if (_png_ok(p)) { return p }
+            i++
+        }
+        return ""
+    }
+
+    // ── RPA ──────────────────────────────────────────────────────────────
+    forge _idx: stone = 0
+    forge _idx_len: stone = 0
+    forge _key: stone = 0
+    forge e_off: stone = 0
+    forge e_len: stone = 0
+
+    vein _hex(b: stone, i: stone, n: stone) -> stone {
+        forge v = 0
+        forge k = 0
+        while (k < n) {
+            forge c = bx.gb(b, i + k)
+            forge d = -1
+            if (c >= 48 && c <= 57) { d = c - 48 }
+            if (c >= 97 && c <= 102) { d = c - 87 }
+            if (c >= 65 && c <= 70) { d = c - 55 }
+            if (d < 0) { return -1 }
+            v = v * 16 + d
+            k++
+        }
+        return v
+    }
+
+    vein rpa_close() -> void {
+        if (_idx != 0) { bx.free(_idx) }
+        _idx = 0
+        _idx_len = 0
+    }
+
+    // Le e descomprime so o indice do .rpa.
+    vein rpa_open(path: obsidian) -> bool {
+        rpa_close()
+        forge h = bx.read_at(path, 0, 40)
+        if (h == 0 || bx.last_len < 34) { return false }
+        forge v3 = bx.gb(h, 0) == 82 && bx.gb(h, 1) == 80 && bx.gb(h, 2) == 65 && bx.gb(h, 3) == 45 && bx.gb(h, 4) == 51 && bx.gb(h, 6) == 48
+        forge v2 = bx.gb(h, 0) == 82 && bx.gb(h, 1) == 80 && bx.gb(h, 2) == 65 && bx.gb(h, 3) == 45 && bx.gb(h, 4) == 50
+        if (!v3 && !v2) { bx.free(h); return false }
+        forge off = _hex(h, 8, 16)
+        _key = 0
+        if (v3) { _key = _hex(h, 25, 8) }
+        bx.free(h)
+        forge size = gd._size(path)
+        forge n = size - off
+        if (off <= 0 || _key < 0 || n <= 2 || n > 33554432) { return false }
+        forge raw = bx.read_at(path, off, n)
+        if (raw == 0 || bx.last_len != n) { return false }
+        forge ok = png.inflate_zlib(raw, n)
+        bx.free(raw)
+        if (!ok) { return false }
+        _idx_len = png.out_len()
+        _idx = bx.alloc(_idx_len + 8)
+        bx.copy(_idx, png.out_ptr(), _idx_len)
+        return true
+    }
+
+    // inteiro do pickle em p; devolve o novo p (-1 se nao for inteiro); valor em _iv
+    forge _iv: stone = 0
+    vein _int_at(p: stone) -> stone {
+        forge op = bx.gb(_idx, p)
+        if (op == 74) { _iv = bx.i32(_idx, p + 1); return p + 5 }      // J BININT
+        if (op == 75) { _iv = bx.gb(_idx, p + 1); return p + 2 }       // K BININT1
+        if (op == 77) { _iv = bx.u16(_idx, p + 1); return p + 3 }      // M BININT2
+        if (op == 138) {                                               // LONG1
+            forge n = bx.gb(_idx, p + 1)
+            forge v = 0
+            forge k = n - 1
+            while (k >= 0) {
+                v = (v << 8) | bx.gb(_idx, p + 2 + k)
+                k--
+            }
+            _iv = v
+            return p + 2 + n
+        }
+        return -1
+    }
+
+    vein _skip_memo(p: stone) -> stone {
+        forge op = bx.gb(_idx, p)
+        if (op == 148) { return p + 1 }        // MEMOIZE
+        if (op == 113) { return p + 2 }        // BINPUT
+        if (op == 114) { return p + 5 }        // LONG_BINPUT
+        return p
+    }
+
+    // Procura a entrada `name` no indice; sucesso -> e_off/e_len.
+    vein rpa_find(name: obsidian) -> bool {
+        if (_idx == 0) { return false }
+        forge nl = ofs_str_len(name)
+        forge nb = bx.alloc(nl + 1)
+        forge k = 0
+        while (k < nl) {
+            bx.pb(nb, k, ofs_str_char_at(name, k))
+            k++
+        }
+        forge c0 = bx.gb(nb, 0)
+        forge p = 0
+        forge found = -1
+        while (p + nl + 2 < _idx_len && found < 0) {
+            forge op = bx.gb(_idx, p)
+            forge s = -1
+            if (op == 140 && bx.gb(_idx, p + 1) == nl) { s = p + 2 }                 // SHORT_BINUNICODE
+            if (op == 88 && bx.u32(_idx, p + 1) == nl) { s = p + 5 }                 // BINUNICODE
+            if (s >= 0 && bx.gb(_idx, s) == c0) {
+                forge j = 1
+                while (j < nl && bx.gb(_idx, s + j) == bx.gb(nb, j)) { j++ }
+                if (j == nl) { found = s + nl }
+            }
+            p++
+        }
+        bx.free(nb)
+        if (found < 0) { return false }
+        p = _skip_memo(found)
+        if (bx.gb(_idx, p) != 93) { return false }     // ] EMPTY_LIST
+        p = _skip_memo(p + 1)
+        if (bx.gb(_idx, p) == 40) { p++ }              // ( MARK
+        p = _int_at(p)
+        if (p < 0) { return false }
+        forge o = _iv
+        p = _int_at(p)
+        if (p < 0) { return false }
+        e_off = o ^ _key
+        e_len = _iv ^ _key
+        return e_off > 0 && e_len > 0 && e_len < 67108864
+    }
+
+    vein rpa_extract(path: obsidian, name: obsidian, dest: obsidian) -> bool {
+        if (!rpa_find(name)) { return false }
+        forge b = bx.read_at(path, e_off, e_len)
+        if (b == 0 || bx.last_len != e_len) { return false }
+        forge ok = bx.write_file(dest, b, e_len)
+        bx.free(b)
+        return ok && _png_ok(dest)
+    }
+
+    // ── Ren'Py ───────────────────────────────────────────────────────────
+    vein renpy(dir: obsidian, out: obsidian) -> void {
+        icone = ""
+        capa = ""
+        forge ic: Array<obsidian> = []
+        ofs_array_push(ic, dir + "/game/gui/window_icon.png")
+        ofs_array_push(ic, dir + "/icon.png")
+        ofs_array_push(ic, dir + "/game/icon.png")
+        icone = _first_png(ic)
+        forge cc: Array<obsidian> = []
+        ofs_array_push(cc, dir + "/game/gui/main_menu.png")
+        capa = _first_png(cc)
+        if (tx.len(icone) == 0 || tx.len(capa) == 0) {
+            forge rpas = bx.list_dir(dir + "/game", 1)
+            forge i = 0
+            while (i < ofs_array_len(rpas)) {
+                forge f: obsidian = ofs_array_get(rpas, i)
+                if (tx.ends(f, ".rpa")) {
+                    forge rp = dir + "/game/" + f
+                    if (rpa_open(rp)) {
+                        bx.mkdir_p(out)
+                        if (tx.len(icone) == 0 && rpa_extract(rp, "gui/window_icon.png", out + "/icon.png")) { icone = out + "/icon.png" }
+                        if (tx.len(capa) == 0 && rpa_extract(rp, "gui/main_menu.png", out + "/cover.png")) { capa = out + "/cover.png" }
+                        if (tx.len(icone) == 0 && rpa_extract(rp, "presplash.png", out + "/icon.png")) { icone = out + "/icon.png" }
+                        rpa_close()
+                    }
+                }
+                i++
+            }
+        }
+        if (tx.len(icone) == 0) {
+            forge pc: Array<obsidian> = []
+            ofs_array_push(pc, dir + "/game/presplash_foreground.png")
+            ofs_array_push(pc, dir + "/game/presplash_background.png")
+            ofs_array_push(pc, dir + "/presplash_foreground.png")
+            ofs_array_push(pc, dir + "/presplash_background.png")
+            ofs_array_push(pc, dir + "/game/presplash.png")
+            icone = _first_png(pc)
+        }
+        // ordem pedida: o icone do jogo vem antes do main_menu (que costuma ser o fundo
+        // padrao do template do Ren'Py) tambem para a capa
+        if (tx.len(icone) > 0) { capa = icone }
+    }
+
+    // ── Godot ────────────────────────────────────────────────────────────
+    forge _pck: obsidian = ""
+    forge _base: stone = 0
+    forge _rel: bool = false
+    forge _dir: stone = 0
+    forge _dir_len: stone = 0
+    forge _dir_n: stone = 0
+    forge _dir_p: stone = 0
+    forge f_off: stone = 0
+    forge f_size: stone = 0
+
+    vein _pck_close() -> void {
+        if (_dir != 0) { bx.free(_dir) }
+        _dir = 0
+    }
+
+    vein _pck_open(path: obsidian) -> bool {
+        _pck_close()
+        _pck = path
+        forge h = bx.read_at(path, 0, 48)
+        if (h == 0 || bx.last_len < 48 || bx.u32(h, 0) != gd.MAGIC) { return false }
+        forge fmt = bx.u32(h, 4)
+        if (fmt < 2) { bx.free(h); return false }
+        forge flags = bx.u32(h, 20)
+        _base = bx.u32(h, 24) | (bx.u32(h, 28) << 32)
+        _rel = (flags & 2) != 0
+        forge dpos = 96
+        if (fmt >= 3) { dpos = bx.u32(h, 32) | (bx.u32(h, 36) << 32) }
+        bx.free(h)
+        if ((flags & 1) != 0) { return false }          // diretorio cifrado
+        forge size = gd._size(path)
+        forge n = size - dpos
+        if (n <= 4 || n > 16777216) { n = 16777216 }
+        _dir = bx.read_at(path, dpos, n)
+        _dir_len = bx.last_len
+        if (_dir == 0 || _dir_len < 4) { return false }
+        _dir_n = bx.u32(_dir, 0)
+        return true
+    }
+
+    // procura `name` (sem res://) no diretorio -> f_off (absoluto) / f_size
+    vein _pck_find(name: obsidian) -> bool {
+        forge nl = ofs_str_len(name)
+        forge p = 4
+        forge i = 0
+        while (i < _dir_n && p + 4 < _dir_len) {
+            forge l = bx.u32(_dir, p)
+            forge s = p + 4
+            forge real = 0
+            while (real < l && bx.gb(_dir, s + real) != 0) { real++ }
+            forge ok = real == nl
+            forge k = 0
+            while (ok && k < nl) {
+                if (bx.gb(_dir, s + k) != ofs_str_char_at(name, k)) { ok = false }
+                k++
+            }
+            forge q = s + l
+            if (ok) {
+                f_off = bx.u32(_dir, q) | (bx.u32(_dir, q + 4) << 32)
+                f_size = bx.u32(_dir, q + 8) | (bx.u32(_dir, q + 12) << 32)
+                if (_rel) { f_off = f_off + _base }
+                forge fl = bx.u32(_dir, q + 32)
+                return (fl & 1) == 0
+            }
+            p = q + 16 + 16 + 4
+            i++
+        }
+        return false
+    }
+
+    // valor String de uma chave do project.binary (ECFG) em b/n
+    vein _ecfg_str(b: stone, n: stone, key: obsidian) -> obsidian {
+        if (n < 8 || bx.gb(b, 0) != 69 || bx.gb(b, 1) != 67) { return "" }
+        forge cnt = bx.u32(b, 4)
+        forge kl = ofs_str_len(key)
+        forge p = 8
+        forge i = 0
+        while (i < cnt && p + 8 < n) {
+            forge l = bx.u32(b, p)
+            forge s = p + 4
+            forge vl = bx.u32(b, s + l)
+            forge v = s + l + 4
+            forge ok = l == kl
+            forge k = 0
+            while (ok && k < kl) {
+                if (bx.gb(b, s + k) != ofs_str_char_at(key, k)) { ok = false }
+                k++
+            }
+            if (ok && bx.u32(b, v) == 4) {             // Variant::STRING
+                forge sl = bx.u32(b, v + 4)
+                forge t = bx.alloc(sl + 1)
+                bx.copy(t, b + v + 8, sl)
+                bx.pb(t, sl, 0)
+                return tx.copy(t as obsidian)
+            }
+            p = v + vl
+            i++
+        }
+        return ""
+    }
+
+    // .pck principal de uma pasta: <pasta>.pck, senao o maior (mesma regra do adaptador Godot)
+    vein escolher_pck(dir: obsidian) -> obsidian {
+        forge fs = bx.list_dir(dir, 1)
+        forge base = tx.lower(tx.file_name(dir)) + ".pck"
+        forge best = ""
+        forge best_n = -1
+        forge i = 0
+        while (i < ofs_array_len(fs)) {
+            forge f: obsidian = ofs_array_get(fs, i)
+            forge lf = tx.lower(f)
+            if (tx.ends(lf, ".pck")) {
+                if (tx.eq(lf, base)) { return f }
+                forge n = gd._size(dir + "/" + f)
+                if (n > best_n) {
+                    best = f
+                    best_n = n
+                }
+            }
+            i++
+        }
+        return best
+    }
+
+    forge _icon_res: obsidian = ""
+
+    // nome/versao/caminho do icone (rapido: so o diretorio e o project.binary)
+    vein godot_info(pck: obsidian) -> bool {
+        nome = ""
+        versao = ""
+        _icon_res = ""
+        if (!_pck_open(pck)) { return false }
+        if (!_pck_find("project.binary")) { return false }
+        forge b = bx.read_at(pck, f_off, f_size)
+        if (b == 0) { return false }
+        nome = _ecfg_str(b, bx.last_len, "application/config/name")
+        versao = _ecfg_str(b, bx.last_len, "application/config/version")
+        _icon_res = _ecfg_str(b, bx.last_len, "application/config/icon")
+        bx.free(b)
+        return true
+    }
+
+    // grava em dest o PNG que comeca em b+i (ate o fim do chunk IEND)
+    vein _png_from(b: stone, n: stone, dest: obsidian) -> bool {
+        forge i = 0
+        while (i + 8 < n) {
+            if (bx.gb(b, i) == 137 && bx.gb(b, i + 1) == 80 && bx.gb(b, i + 2) == 78 && bx.gb(b, i + 3) == 71) {
+                forge j = i + 8
+                while (j + 12 <= n) {
+                    forge cl = (bx.gb(b, j) << 24) | (bx.gb(b, j + 1) << 16) | (bx.gb(b, j + 2) << 8) | bx.gb(b, j + 3)
+                    if (bx.gb(b, j + 4) == 73 && bx.gb(b, j + 5) == 69 && bx.gb(b, j + 6) == 78 && bx.gb(b, j + 7) == 68) {
+                        return bx.write_file(dest, b + i, j + 12 - i)
+                    }
+                    j = j + 12 + cl
+                }
+                return false
+            }
+            i++
+        }
+        return false
+    }
+
+    vein godot(pck: obsidian, out: obsidian) -> void {
+        icone = ""
+        capa = ""
+        if (!godot_info(pck) || tx.len(_icon_res) == 0) { _pck_close(); return }
+        forge res = _icon_res
+        if (tx.starts(res, "res://")) { res = tx.sub(res, 6, tx.len(res) - 6) }
+        forge alvo = out + "/icon.png"
+        bx.mkdir_p(out)
+        if (tx.ends(res, ".png") && _pck_find(res)) {
+            forge b = bx.read_at(pck, f_off, f_size)
+            if (b != 0 && _png_from(b, bx.last_len, alvo)) { icone = alvo }
+            if (b != 0) { bx.free(b) }
+        }
+        if (tx.len(icone) == 0 && _pck_find(res + ".import")) {
+            forge t = bx.read_at(pck, f_off, f_size)
+            forge tn = bx.last_len
+            // path="res://.godot/imported/xxx.ctex"  (primeira linha path=)
+            forge ip = ""
+            forge i = 0
+            while (t != 0 && i + 6 < tn && tx.len(ip) == 0) {
+                if (bx.gb(t, i) == 112 && bx.gb(t, i + 1) == 97 && bx.gb(t, i + 2) == 116 && bx.gb(t, i + 3) == 104 && bx.gb(t, i + 4) == 61 && bx.gb(t, i + 5) == 34 && (i == 0 || bx.gb(t, i - 1) == 10)) {
+                    forge j = i + 6
+                    while (j < tn && bx.gb(t, j) != 34) { j++ }
+                    ip = tx.from_bytes(t + i + 6, j - i - 6)
+                }
+                i++
+            }
+            if (t != 0) { bx.free(t) }
+            if (tx.starts(ip, "res://")) { ip = tx.sub(ip, 6, tx.len(ip) - 6) }
+            if (tx.len(ip) > 0 && _pck_find(ip)) {
+                forge c = bx.read_at(pck, f_off, f_size)
+                if (c != 0 && _png_from(c, bx.last_len, alvo)) { icone = alvo }
+                if (c != 0) { bx.free(c) }
+            }
+        }
+        _pck_close()
+        capa = icone
+    }
+}

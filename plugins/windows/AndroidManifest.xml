@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Plugin de compatibilidade Windows do M.O.O.N (prototipo).
+     targetSdk 28 e obrigatorio: a partir do 29 o Android proibe execve()/mprotect(EXEC)
+     em arquivos de files/ (W^X), e Box64/Wine precisam disso. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.fixedseat.moon.plugin.windows"
+    android:versionCode="1" android:versionName="0.1-proto">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="28"/>
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+  <application android:label="MOON Windows" android:debuggable="true"
+      android:extractNativeLibs="true" android:largeHeap="true">
+    <activity android:name=".RunActivity" android:exported="true"
+        android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+        android:screenOrientation="sensorLandscape">
+      <intent-filter>
+        <action android:name="com.fixedseat.moon.plugin.windows.RUN"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN"/>
+        <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

@@ -1,0 +1,118 @@
+// moon-import — importador sem janela (substitui moon_convert.ps1 e import_cli.gd).
+//
+//   moon-import --src <pasta do jogo> --dst <saida> [--data <pasta com sjis932.bin>]
+//               [--audio wav|skip] [--no-images] [--no-scripts] [--no-jp]
+//               [--script NOME.SNX]   (converte so um script, para depurar)
+//               [--image NOME]        (decodifica so uma imagem -> <dst>/NOME.png)
+
+attach {F:../drivers/tactics_moon.ofs}
+
+extern vein time(t: *stone) -> stone
+extern vein localtime_r(t: *stone, tm: *stone) -> *stone
+extern vein exit(code: stone) -> void
+
+vein two(v: stone) -> obsidian {
+    if (v < 10) { return "0" + tx.num(v) }
+    return tx.num(v)
+}
+
+// "AAAA-MM-DDTHH:MM:SS" (Time.get_datetime_string_from_system)
+vein stamp() -> obsidian {
+    forge tb = bx.alloc(16)
+    forge tm_b = bx.alloc(128)
+    time(tb as *stone)
+    localtime_r(tb as *stone, tm_b as *stone)
+    forge s = tx.num(bx.i32(tm_b, 20) + 1900) + "-" + two(bx.i32(tm_b, 16) + 1) + "-" + two(bx.i32(tm_b, 12))
+    return s + "T" + two(bx.i32(tm_b, 8)) + ":" + two(bx.i32(tm_b, 4)) + ":" + two(bx.i32(tm_b, 0))
+}
+
+vein exe_dir() -> obsidian {
+    forge a = tx.args()
+    if (ofs_array_len(a) == 0) { return "." }
+    forge p: obsidian = ofs_array_get(a, 0)
+    return tx.dir_name(p)
+}
+
+core main() {
+    forge a = tx.args()
+    forge src = ""
+    forge dst = ""
+    forge data = ""
+    forge audio = "wav"
+    forge images = true
+    forge scripts = true
+    forge jp = true
+    forge one_script = ""
+    forge one_image = ""
+    forge i = 1
+    while (i < ofs_array_len(a)) {
+        forge k: obsidian = ofs_array_get(a, i)
+        forge v = ""
+        if (i + 1 < ofs_array_len(a)) { v = ofs_array_get(a, i + 1) }
+        if (tx.eq(k, "--src")) { src = v; i++ }
+        else if (tx.eq(k, "--dst")) { dst = v; i++ }
+        else if (tx.eq(k, "--data")) { data = v; i++ }
+        else if (tx.eq(k, "--audio")) { audio = v; i++ }
+        else if (tx.eq(k, "--script")) { one_script = v; i++ }
+        else if (tx.eq(k, "--image")) { one_image = v; i++ }
+        else if (tx.eq(k, "--no-images")) { images = false }
+        else if (tx.eq(k, "--no-scripts")) { scripts = false; jp = false }
+        else if (tx.eq(k, "--no-jp")) { jp = false }
+        i++
+    }
+    if (tx.len(src) == 0 || tx.len(dst) == 0) {
+        echo("uso: moon-import --src <pasta do jogo> --dst <saida> [--data <dir>] [--audio wav|skip] [--no-images] [--no-scripts] [--no-jp]")
+        exit(2)
+    }
+    // tabela SJIS: --data, ao lado do executavel, ../data, ou data/
+    forge cands: Array<obsidian> = []
+    if (tx.len(data) > 0) { ofs_array_push(cands, data + "/sjis932.bin") }
+    ofs_array_push(cands, exe_dir() + "/sjis932.bin")
+    ofs_array_push(cands, exe_dir() + "/data/sjis932.bin")
+    ofs_array_push(cands, exe_dir() + "/../data/sjis932.bin")
+    ofs_array_push(cands, "data/sjis932.bin")
+    forge ok = false
+    forge c = 0
+    while (c < ofs_array_len(cands) && !ok) {
+        forge cp: obsidian = ofs_array_get(cands, c)
+        ok = tm.load_sjis(cp)
+        c++
+    }
+    if (!ok) {
+        echo("ERRO: sjis932.bin nao encontrado (use --data <dir>)")
+        exit(1)
+    }
+    if (tx.len(one_script) > 0 || tx.len(one_image) > 0) {
+        forge pk = tm.pack_open(src + "/moon_eng")
+        if (pk < 0) {
+            echo("ERRO: moon_eng.lst nao encontrado em " + src)
+            exit(1)
+        }
+        bx.mkdir_p(dst)
+        if (tx.len(one_script) > 0) {
+            forge ins = tm.script_from_pack(pk, one_script)
+            if (ins < 0) {
+                echo("ERRO: script nao encontrado: " + one_script)
+                exit(1)
+            }
+            forge b = sb.new()
+            tm.instructions_to_json(b, tx.upper(one_script), ins)
+            sb.write(b, dst + "/" + tx.basename(tx.upper(one_script)) + ".json")
+            echo("script " + one_script + ": " + tx.num(json.count(ins)) + " instrucoes")
+        }
+        if (tx.len(one_image) > 0) {
+            forge im = tm.load_image(pk, one_image)
+            if (im < 0) {
+                echo("ERRO: imagem nao decodificada: " + one_image)
+                exit(1)
+            }
+            img.save_png(im, dst + "/" + one_image + ".png", false)
+            echo("imagem " + one_image + ": " + tx.num(img.w(im)) + "x" + tx.num(img.h(im)))
+        }
+        exit(0)
+    }
+    forge rep = tm.import_game(src, dst, scripts, jp, images, audio, stamp())
+    echo("REPORT " + json.stringify(rep, ""))
+    if (json.kind(json.get(rep, "ok")) == json.K_TRUE) { exit(0) }
+    exit(1)
+}

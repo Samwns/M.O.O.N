@@ -1,0 +1,917 @@
+// M.O.O.N — VM de script (porta direta de batch/vn_player_godot/src/core/MoonVM.gd).
+//
+// run() executa instrucoes ate uma precisar do jogador (say, choice, wait,
+// transition, menu, video, end) e a devolve (id de objeto JSON). Mudancas de
+// cena (bg, char, audio, chapter) vao para a fila vm.cmds na ordem em que
+// acontecem (no Godot era o sinal `command`) e ficam em vm.scene para o save.
+// Semantica do MOON_eng.EXE: VM FUN_004045b0, expressoes FUN_00404acc
+// (saturacao em 16 bits sem sinal: 0..65535, igual ao clampi do GDScript).
+//
+// Instrucoes sao objetos JSON no mesmo formato do conversor do Godot; os
+// scripts vem de <scripts_dir>/<NOME>.json ou de vm.add_script() (ex.: SNX
+// convertido em memoria pelo driver).
+//
+// Estado em globais de namespace com tipos simples/Array (nunca monolith).
+
+attach {hashmap}
+attach {F:bytes.ofs}
+attach {F:json.ofs}
+
+namespace vm {
+    forge VAR_COUNT: stone = 256
+    forge FLAG_COUNT: stone = 512
+    forge MAX_STEPS: stone = 200000
+
+    // codigos internos de opcode (resolvidos ao carregar o script)
+    forge O_UNKNOWN: stone = 0
+    forge O_SET_VAR: stone = 1
+    forge O_SET_FLAG: stone = 2
+    forge O_ADD_VAR: stone = 3
+    forge O_SUB_VAR: stone = 4
+    forge O_GOTO: stone = 5
+    forge O_IF_NOT_GOTO: stone = 6
+    forge O_FLAG_ON: stone = 7
+    forge O_FLAG_OFF: stone = 8
+    forge O_FLAG_TOGGLE: stone = 9
+    forge O_IF_FLAG_OFF: stone = 10
+    forge O_IF_FLAG_ON: stone = 11
+    forge O_RANDOM: stone = 12
+    forge O_JUMP: stone = 13
+    forge O_CALL: stone = 14
+    forge O_RETURN: stone = 15
+    forge O_CHAPTER: stone = 16
+    forge O_BG: stone = 17
+    forge O_CHAR: stone = 18
+    forge O_LAYER_MODE: stone = 19
+    forge O_AUDIO: stone = 20
+    forge O_STOP_AUDIO: stone = 21
+    forge O_TRANSITION: stone = 22
+    forge O_END: stone = 23
+    forge O_BLOCK: stone = 24
+    // opcodes descobertos no MOON_eng.EXE (Fase 1); so agem com vm.ext = true
+    forge O_DECK_NEW: stone = 25      // op_33 n: baralho 1..n embaralhado
+    forge O_DECK_DRAW: stone = 26     // op_34 v: var[v] = proxima carta
+    forge O_GFLAG_GET: stone = 27     // op_3b f g: flag[f] = gflag[g]
+    forge O_GFLAG_SET: stone = 28     // op_3c g b: gflag[g] = b != 0
+    forge O_SEEN_GET: stone = 29      // op_3d f nome: flag[f] = imagem ja vista
+    forge O_CLEAR_ALL: stone = 30     // op_57: zera as 256 vars e 512 flags
+    // camadas extras (so agem com vm.layers = true; o player liga)
+    forge O_LX_LOAD: stone = 31       // op_3e slot nome: sprite com mascara no slot (placa do horario)
+    forge O_LX_SHOW: stone = 32       // op_3f slot b: mostra/esconde
+    forge O_LX_POS: stone = 33        // op_56 slot x y
+    forge O_MK_LOAD: stone = 34       // op_50 nome: marcador do mapa
+    forge O_MK_SHOW: stone = 35       // op_51 b
+    forge O_MK_POS: stone = 36        // op_52 x y
+    forge O_UI: stone = 37            // op_2d/2f/30-32/36-3a/41/42/46/4d: configuracao de UI (ver ui_*)
+
+    // false = mesma semantica do MoonVM.gd (op_XX sem efeito); true = aplica os op_XX acima
+    forge ext: bool = false
+    // true = guarda as camadas extras (op_3e/3f/56) e o marcador do mapa (op_50/51/52)
+    forge layers: bool = false
+    forge LX_COUNT: stone = 4
+    forge lx_name: Array<obsidian> = ["", "", "", ""]
+    forge lx_x: Array<stone> = [0, 0, 0, 0]
+    forge lx_y: Array<stone> = [0, 0, 0, 0]
+    forge lx_on: Array<stone> = [0, 0, 0, 0]
+    forge mk_name: obsidian = ""
+    forge mk_x: stone = 0
+    forge mk_y: stone = 0
+    forge mk_on: stone = 0
+    // configuracao de UI do INIT (MOON_eng.EXE; semantica confirmada no codigo, ver MOON.md)
+    forge ui_set: bool = false           // true depois de op_37/op_38
+    forge ui_icon: obsidian = ""         // op_2d: sprite do icone de espera (ICONDEF: 7 quadros de 32x32, 3 linhas)
+    forge ui_icon_frames: stone = 7
+    forge ui_icon_wait: stone = 30       // op_41: tempo por quadro do icone (unidade do jogo, ~10 ms)
+    forge ui_win: obsidian = ""          // op_2f: sprite da janela (MES, 620x210)
+    forge ui_win_x: stone = 11           //   posicao da janela na tela de 640x480
+    forge ui_win_y: stone = 270
+    forge ui_txt_x: stone = 30           //   origem do texto relativa a janela
+    forge ui_txt_y: stone = 23
+    forge ui_icon_x: stone = 536         //   posicao absoluta do icone de espera
+    forge ui_icon_y: stone = 380
+    forge ui_delay: stone = 32           // op_36: espera por caractere do jogo (padrao 0x20)
+    forge ui_linesp: stone = 4           // op_39: espaco extra entre linhas em px (padrao 4)
+    forge ui_text_rgb: stone = 16777215  // op_37 a: texto
+    forge ui_shadow_rgb: stone = 0       // op_37 b: sombra
+    forge ui_sel_rgb: stone = 255        // op_38 a: escolha em destaque
+    forge ui_norm_rgb: stone = 9868950   // op_38 b: escolha normal
+    forge ui_btn1: stone = 1             // op_30/31/32: botoes e global da UI
+    forge ui_btn2: stone = 1
+    forge ui_glob: stone = 1
+    forge ui_rects: Array<stone> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  // op_3a (0..3), op_42 (4..11), op_4d (12..15)
+    forge ret_script: obsidian = ""      // op_46: ponto de retorno (script + pc) gravado no INIT
+    forge ret_pc: stone = -1
+    forge layers_changed: bool = false   // o player limpa depois de redesenhar
+    // flags globais persistentes (tabela +0x1082c do EXE; nao vao para o save de slot)
+    forge gflags: Array<stone> = []
+    forge seen_list: Array<stone> = []   // hashes de mark_seen (para o save de sistema)
+    forge globals_dirty: bool = false    // gflags/vistos mudaram desde o ultimo save de sistema
+    forge _seen: stone = -1
+    forge _deck: Array<stone> = []
+    forge _deck_pos: stone = 0
+
+    forge scripts_dir: obsidian = ""
+    forge script_name: obsidian = ""
+    forge pc: stone = 0
+    forge block_addr: stone = 0
+    forge vars: Array<stone> = []
+    forge flags: Array<stone> = []
+    forge cs_script: Array<obsidian> = []
+    forge cs_addr: Array<stone> = []
+    forge scene: stone = -1
+    forge cmds: Array<stone> = []
+    forge rng: stone = 12345
+    forge last_error: obsidian = ""
+
+    // script atual: fatia [_off, _off+_len) dos pools + mapa addr -> indice
+    forge _off: stone = 0
+    forge _len: stone = 0
+    forge _idx: stone = -1
+    forge _pool_ins: Array<stone> = []
+    forge _pool_kind: Array<stone> = []
+    forge c_name: Array<obsidian> = []
+    forge c_off: Array<stone> = []
+    forge c_len: Array<stone> = []
+    forge c_idx: Array<stone> = []
+
+    vein init(dir: obsidian) -> void {
+        scripts_dir = dir
+        reset()
+    }
+
+    vein _fill(a: Array<stone>, n: stone) -> void {
+        bx.arr_truncate(a, 0)
+        forge i = 0
+        while (i < n) {
+            ofs_array_push(a, 0)
+            i++
+        }
+    }
+
+    vein _chars3() -> stone {
+        forge a = json.arr()
+        json.push(a, json.str(""))
+        json.push(a, json.str(""))
+        json.push(a, json.str(""))
+        return a
+    }
+
+    vein _globals() -> void {
+        if (ofs_array_len(gflags) == 0) { _fill(gflags, FLAG_COUNT) }
+        if (_seen < 0) { _seen = hashmap.new(256) }
+    }
+
+    vein _hash(s: obsidian) -> stone {
+        forge h = -3750763034362895579
+        forge i = 0
+        while (i < tx.len(s)) {
+            h = (h ^ tx.at(s, i)) * 1099511628211
+            i++
+        }
+        return h
+    }
+
+    vein mark_seen(name: obsidian) -> void {
+        _globals()
+        forge h = _hash(tx.upper(name))
+        if (!hashmap.has(_seen, h)) {
+            hashmap.set(_seen, h, 1)
+            ofs_array_push(seen_list, h)
+            globals_dirty = true
+        }
+    }
+
+    // Save de sistema (como o EXE guarda as 512 flags globais e as imagens
+    // ja vistas): {"gflags":[...], "seen":[hash...]}.
+    vein globals_json() -> stone {
+        _globals()
+        forge o = json.obj()
+        json.put(o, "gflags", _int_array(gflags))
+        json.put(o, "seen", _int_array(seen_list))
+        return o
+    }
+
+    vein globals_from(o: stone) -> void {
+        _globals()
+        if (!json.is_obj(o)) { return }
+        forge c = json.first(json.get(o, "gflags"))
+        forge i = 0
+        while (c >= 0 && i < FLAG_COUNT) {
+            ofs_array_set(gflags, i, json.ival(c))
+            c = json.next(c)
+            i++
+        }
+        c = json.first(json.get(o, "seen"))
+        while (c >= 0) {
+            forge h = json.ival(c)
+            if (!hashmap.has(_seen, h)) {
+                hashmap.set(_seen, h, 1)
+                ofs_array_push(seen_list, h)
+            }
+            c = json.next(c)
+        }
+        globals_dirty = false
+    }
+
+    vein is_seen(name: obsidian) -> bool {
+        _globals()
+        return hashmap.has(_seen, _hash(tx.upper(name)))
+    }
+
+    vein _arg(ins: stone, i: stone) -> stone {
+        return json.at(json.get(ins, "args"), i)
+    }
+
+    // op_33 (FUN_00418d80): cartas 1..n embaralhadas; op_34 (FUN_00418e5c) tira do fim
+    // e, quando so resta a primeira, devolve-a e reembaralha.
+    vein _deck_new(n: stone) -> void {
+        bx.arr_truncate(_deck, 0)
+        forge i = 0
+        while (i < n) {
+            ofs_array_push(_deck, i + 1)
+            i++
+        }
+        i = n - 1
+        while (i > 0) {
+            forge j = _rand() % (i + 1)
+            forge t: stone = ofs_array_get(_deck, i)
+            ofs_array_set(_deck, i, ofs_array_get(_deck, j))
+            ofs_array_set(_deck, j, t)
+            i--
+        }
+        _deck_pos = n - 1
+    }
+
+    vein _deck_draw() -> stone {
+        forge n = ofs_array_len(_deck)
+        if (n == 0) { return 0 }
+        if (_deck_pos > 0) {
+            forge v: stone = ofs_array_get(_deck, _deck_pos)
+            _deck_pos--
+            return v
+        }
+        forge v0: stone = ofs_array_get(_deck, 0)
+        _deck_new(n)
+        return v0
+    }
+
+    vein reset() -> void {
+        _fill(vars, VAR_COUNT)
+        _fill(flags, FLAG_COUNT)
+        bx.sarr_truncate(cs_script, 0)
+        bx.arr_truncate(cs_addr, 0)
+        scene = json.obj()
+        json.put_s(scene, "bg", "")
+        json.put(scene, "chars", _chars3())
+        json.put_i(scene, "layer_mode", 0)
+        json.put_s(scene, "bgm", "")
+        json.put_i(scene, "bgm_loop", 1)
+        json.put_s(scene, "chapter", "")
+        json.put(scene, "shown_chars", _chars3())
+        _layers_reset()
+    }
+
+    vein _layers_reset() -> void {
+        forge i = 0
+        while (i < LX_COUNT) {
+            ofs_array_set(lx_name, i, "")
+            ofs_array_set(lx_x, i, 0)
+            ofs_array_set(lx_y, i, 0)
+            ofs_array_set(lx_on, i, 0)
+            i++
+        }
+        mk_name = ""
+        mk_x = 0
+        mk_y = 0
+        mk_on = 0
+        layers_changed = true
+    }
+
+    vein _slot_ok(s: stone) -> bool { return s >= 0 && s < LX_COUNT }
+
+    // ── scripts ──────────────────────────────────────────────────────────
+    vein _kind_of(op: obsidian) -> stone {
+        if (tx.eq(op, "say") || tx.eq(op, "choice") || tx.eq(op, "wait") || tx.eq(op, "wait_sync") || tx.eq(op, "wait_click") || tx.eq(op, "menu") || tx.eq(op, "load_menu") || tx.eq(op, "video")) { return O_BLOCK }
+        if (tx.eq(op, "set_var")) { return O_SET_VAR }
+        if (tx.eq(op, "set_flag")) { return O_SET_FLAG }
+        if (tx.eq(op, "add_var")) { return O_ADD_VAR }
+        if (tx.eq(op, "sub_var")) { return O_SUB_VAR }
+        if (tx.eq(op, "goto")) { return O_GOTO }
+        if (tx.eq(op, "if_not_goto")) { return O_IF_NOT_GOTO }
+        if (tx.eq(op, "flag_on")) { return O_FLAG_ON }
+        if (tx.eq(op, "flag_off")) { return O_FLAG_OFF }
+        if (tx.eq(op, "flag_toggle")) { return O_FLAG_TOGGLE }
+        if (tx.eq(op, "if_flag_off_goto")) { return O_IF_FLAG_OFF }
+        if (tx.eq(op, "if_flag_on_goto")) { return O_IF_FLAG_ON }
+        if (tx.eq(op, "random")) { return O_RANDOM }
+        if (tx.eq(op, "jump")) { return O_JUMP }
+        if (tx.eq(op, "call")) { return O_CALL }
+        if (tx.eq(op, "return")) { return O_RETURN }
+        if (tx.eq(op, "chapter")) { return O_CHAPTER }
+        if (tx.eq(op, "bg")) { return O_BG }
+        if (tx.eq(op, "char")) { return O_CHAR }
+        if (tx.eq(op, "layer_mode")) { return O_LAYER_MODE }
+        if (tx.eq(op, "audio")) { return O_AUDIO }
+        if (tx.eq(op, "stop_audio")) { return O_STOP_AUDIO }
+        if (tx.eq(op, "transition") || tx.eq(op, "blit")) { return O_TRANSITION }
+        if (tx.eq(op, "end")) { return O_END }
+        if (tx.eq(op, "op_33")) { return O_DECK_NEW }
+        if (tx.eq(op, "op_34")) { return O_DECK_DRAW }
+        if (tx.eq(op, "op_3b")) { return O_GFLAG_GET }
+        if (tx.eq(op, "op_3c")) { return O_GFLAG_SET }
+        if (tx.eq(op, "op_3d")) { return O_SEEN_GET }
+        if (tx.eq(op, "op_57")) { return O_CLEAR_ALL }
+        if (tx.eq(op, "op_2d") || tx.eq(op, "op_2f") || tx.eq(op, "op_30") || tx.eq(op, "op_31") || tx.eq(op, "op_32")) { return O_UI }
+        if (tx.eq(op, "op_36") || tx.eq(op, "op_37") || tx.eq(op, "op_38") || tx.eq(op, "op_39") || tx.eq(op, "op_3a")) { return O_UI }
+        if (tx.eq(op, "op_41") || tx.eq(op, "op_42") || tx.eq(op, "op_46") || tx.eq(op, "op_4d")) { return O_UI }
+        if (tx.eq(op, "op_3e")) { return O_LX_LOAD }
+        if (tx.eq(op, "op_3f")) { return O_LX_SHOW }
+        if (tx.eq(op, "op_56")) { return O_LX_POS }
+        if (tx.eq(op, "op_50")) { return O_MK_LOAD }
+        if (tx.eq(op, "op_51")) { return O_MK_SHOW }
+        if (tx.eq(op, "op_52")) { return O_MK_POS }
+        return O_UNKNOWN
+    }
+
+    vein _cache_find(key: obsidian) -> stone {
+        forge i = 0
+        while (i < ofs_array_len(c_name)) {
+            forge n: obsidian = ofs_array_get(c_name, i)
+            if (tx.eq(n, key)) { return i }
+            i++
+        }
+        return -1
+    }
+
+    // Registra um script ja convertido (array JSON de instrucoes).
+    vein add_script(name: obsidian, ins: stone) -> stone {
+        forge key = tx.upper(tx.basename(name))
+        forge old = _cache_find(key)
+        forge off = ofs_array_len(_pool_ins)
+        forge m = hashmap.new(json.count(ins) + 1)
+        forge c = json.first(ins)
+        forge i = 0
+        while (c >= 0) {
+            ofs_array_push(_pool_ins, c)
+            ofs_array_push(_pool_kind, _kind_of(json.gs(c, "op", "")))
+            hashmap.set(m, json.gi(c, "addr", -1), i)
+            i++
+            c = json.next(c)
+        }
+        if (old >= 0) {
+            ofs_array_set(c_off, old, off)
+            ofs_array_set(c_len, old, i)
+            ofs_array_set(c_idx, old, m)
+            return old
+        }
+        ofs_array_push(c_name, key)
+        ofs_array_push(c_off, off)
+        ofs_array_push(c_len, i)
+        ofs_array_push(c_idx, m)
+        return ofs_array_len(c_name) - 1
+    }
+
+    vein has_script(name: obsidian) -> bool {
+        forge key = tx.upper(tx.basename(name))
+        if (_cache_find(key) >= 0) { return true }
+        return bx.exists(scripts_dir + "/" + key + ".json")
+    }
+
+    vein load_script_cached(name: obsidian) -> stone {
+        forge key = tx.upper(tx.basename(name))
+        forge ci = _cache_find(key)
+        if (ci >= 0) { return ci }
+        forge j = json.load(scripts_dir + "/" + key + ".json")
+        if (!json.is_obj(j)) { return -1 }
+        forge ins = json.get(j, "instructions")
+        if (ins < 0) { ins = json.arr() }
+        return add_script(key, ins)
+    }
+
+    vein load_script(name: obsidian, addr: stone) -> bool {
+        forge ci = load_script_cached(name)
+        if (ci < 0) {
+            last_error = "script not found: " + tx.upper(tx.basename(name))
+            return false
+        }
+        script_name = ofs_array_get(c_name, ci)
+        _off = ofs_array_get(c_off, ci)
+        _len = ofs_array_get(c_len, ci)
+        _idx = ofs_array_get(c_idx, ci)
+        pc = hashmap.get(_idx, addr, 0)
+        return true
+    }
+
+    vein count() -> stone { return _len }
+    vein ins_at(i: stone) -> stone { return ofs_array_get(_pool_ins, _off + i) }
+
+    vein current_index() -> stone {
+        forge d = pc - 1
+        if (d < 0) { d = 0 }
+        return hashmap.get(_idx, block_addr, d)
+    }
+
+    // ── valores ──────────────────────────────────────────────────────────
+    vein _sat(v: stone) -> stone {
+        if (v < 0) { return 0 }
+        if (v > 65535) { return 65535 }
+        return v
+    }
+
+    vein _get(a: Array<stone>, i: stone) -> stone {
+        if (i < 0 || i >= ofs_array_len(a)) { return 0 }
+        return ofs_array_get(a, i)
+    }
+
+    vein _put(a: Array<stone>, i: stone, v: stone) -> void {
+        if (i < 0 || i >= ofs_array_len(a)) { return }
+        ofs_array_set(a, i, v)
+    }
+
+    vein _value(t: stone) -> stone {
+        if (json.is_str(t)) {
+            forge s = json.sval(t)
+            if (tx.starts(s, "var[")) { return _get(vars, tx.to_int(tx.sub(s, 4, tx.len(s) - 5))) }
+            if (tx.starts(s, "flag[")) { return _get(flags, tx.to_int(tx.sub(s, 5, tx.len(s) - 6))) }
+            return tx.to_int(s)
+        }
+        return json.ival(t)
+    }
+
+    // bool -> 0/1 (contorno: `(a == b) as stone` gera IR invalido, ver COMPILER_ISSUES.md)
+    vein _b(c: bool) -> stone {
+        if (c) { return 1 }
+        return 0
+    }
+
+    vein _binop(op: obsidian, a: stone, b: stone) -> stone {
+        if (tx.eq(op, "==")) { return _b(a == b) }
+        if (tx.eq(op, "!=")) { return _b(a != b) }
+        if (tx.eq(op, "<")) { return _b(a < b) }
+        if (tx.eq(op, ">")) { return _b(a > b) }
+        if (tx.eq(op, "<=")) { return _b(a <= b) }
+        if (tx.eq(op, ">=")) { return _b(a >= b) }
+        if (tx.eq(op, "+")) { return _sat(a + b) }
+        if (tx.eq(op, "-")) { return _sat(a - b) }
+        if (tx.eq(op, "*")) { return _sat(a * b) }
+        if (tx.eq(op, "/")) {
+            if (b == 0) { return 0 }
+            return a / b
+        }
+        if (tx.eq(op, "%")) {
+            if (b == 0) { return 0 }
+            return a % b
+        }
+        if (tx.eq(op, "|")) { return a | b }
+        if (tx.eq(op, "^")) { return a ^ b }
+        if (tx.eq(op, "&")) { return a & b }
+        if (tx.eq(op, "<<")) { return a << (b & 31) }
+        if (tx.eq(op, ">>")) { return a >> (b & 31) }
+        return 0
+    }
+
+    vein eval_expr(tokens: stone) -> stone {
+        forge st: Array<stone> = []
+        forge t = json.first(tokens)
+        while (t >= 0) {
+            forge s = ""
+            forge is_op = false
+            if (json.is_str(t)) {
+                s = json.sval(t)
+                is_op = !(tx.starts(s, "var[") || tx.starts(s, "flag[") || tx.is_int(s))
+            }
+            if (is_op) {
+                forge n = ofs_array_len(st)
+                if (tx.eq(s, "abs") || tx.eq(s, "neg") || tx.eq(s, "not")) {
+                    forge x = 0
+                    if (n > 0) {
+                        x = ofs_array_get(st, n - 1)
+                        bx.arr_truncate(st, n - 1)
+                    }
+                    if (tx.eq(s, "abs")) {
+                        if (x < 0) { x = 0 - x }
+                    } else if (tx.eq(s, "neg")) {
+                        x = 0 - x
+                    } else {
+                        if (x == 0) { x = 1 } else { x = 0 }
+                    }
+                    ofs_array_push(st, x)
+                } else {
+                    forge b = 0
+                    forge a = 0
+                    if (n > 0) {
+                        b = ofs_array_get(st, n - 1)
+                        n--
+                    }
+                    if (n > 0) {
+                        a = ofs_array_get(st, n - 1)
+                        n--
+                    }
+                    bx.arr_truncate(st, n)
+                    ofs_array_push(st, _binop(s, a, b))
+                }
+            } else {
+                ofs_array_push(st, _value(t))
+            }
+            t = json.next(t)
+        }
+        if (ofs_array_len(st) == 0) { return 0 }
+        return ofs_array_get(st, ofs_array_len(st) - 1)
+    }
+
+    vein _src(ins: stone) -> stone {
+        if (tx.eq(json.gs(ins, "src_kind", "imm"), "expr")) { return eval_expr(json.get(ins, "src")) }
+        return _value(json.get(ins, "src"))
+    }
+
+    // ── execucao ─────────────────────────────────────────────────────────
+    vein _goto(addr: stone) -> void {
+        pc = hashmap.get(_idx, addr, _len)
+    }
+
+    vein _return_from_call() -> bool {
+        forge n = ofs_array_len(cs_script)
+        if (n == 0) { return false }
+        forge s: obsidian = ofs_array_get(cs_script, n - 1)
+        forge a: stone = ofs_array_get(cs_addr, n - 1)
+        bx.sarr_truncate(cs_script, n - 1)
+        bx.arr_truncate(cs_addr, n - 1)
+        return load_script(s, a)
+    }
+
+    vein _end_ins(err: obsidian) -> stone {
+        forge o = json.obj()
+        json.put_s(o, "op", "end")
+        json.put_i(o, "addr", -1)
+        if (tx.len(err) > 0) { json.put_s(o, "error", err) }
+        return o
+    }
+
+    vein _emit(ins: stone) -> void {
+        ofs_array_push(cmds, ins)
+    }
+
+    // Esvazia a fila de comandos (o chamador ja os leu).
+    vein clear_cmds() -> void {
+        bx.arr_truncate(cmds, 0)
+    }
+
+    vein _rand() -> stone {
+        rng = (rng * 1103515245 + 12345) & 2147483647
+        return rng >> 16
+    }
+
+    // Executa ate uma instrucao precisar do jogador. Devolve essa instrucao.
+    vein run() -> stone {
+        forge steps = 0
+        while (steps < MAX_STEPS) {
+            steps++
+            if (pc >= _len) {
+                if (_return_from_call()) { continue }
+                return _end_ins("")
+            }
+            forge ins: stone = ofs_array_get(_pool_ins, _off + pc)
+            forge k: stone = ofs_array_get(_pool_kind, _off + pc)
+            pc++
+            if (k == O_SET_VAR) {
+                _put(vars, json.gi(ins, "dst", 0), _sat(_src(ins)))
+            } else if (k == O_SET_FLAG) {
+                forge fv = 0
+                if (_src(ins) != 0) { fv = 1 }
+                _put(flags, json.gi(ins, "dst", 0), fv)
+            } else if (k == O_ADD_VAR) {
+                forge d = json.gi(ins, "dst", 0)
+                _put(vars, d, _sat(_get(vars, d) + _src(ins)))
+            } else if (k == O_SUB_VAR) {
+                forge d2 = json.gi(ins, "dst", 0)
+                _put(vars, d2, _sat(_get(vars, d2) - _src(ins)))
+            } else if (k == O_GOTO) {
+                _goto(json.gi(ins, "to", 0))
+            } else if (k == O_IF_NOT_GOTO) {
+                if (eval_expr(json.get(ins, "cond")) == 0) { _goto(json.gi(ins, "to", 0)) }
+            } else if (k == O_FLAG_ON) {
+                _put(flags, json.gi(ins, "flag", 0), 1)
+            } else if (k == O_FLAG_OFF) {
+                _put(flags, json.gi(ins, "flag", 0), 0)
+            } else if (k == O_FLAG_TOGGLE) {
+                forge fi = json.gi(ins, "flag", 0)
+                _put(flags, fi, 1 - _get(flags, fi))
+            } else if (k == O_IF_FLAG_OFF) {
+                if (_get(flags, json.gi(ins, "flag", 0)) == 0) { _goto(json.gi(ins, "to", 0)) }
+            } else if (k == O_IF_FLAG_ON) {
+                if (_get(flags, json.gi(ins, "flag", 0)) == 1) { _goto(json.gi(ins, "to", 0)) }
+            } else if (k == O_RANDOM) {
+                forge m = json.gi(ins, "mod", 0)
+                forge rv = 0
+                if (m > 0) { rv = _rand() % m }
+                _put(vars, json.gi(ins, "dst", 0), rv)
+            } else if (k == O_JUMP) {
+                bx.sarr_truncate(cs_script, 0)
+                bx.arr_truncate(cs_addr, 0)
+                forge tg = json.gs(ins, "target", "")
+                if (!load_script(tg, 0)) { return _end_ins("missing " + tg) }
+            } else if (k == O_CALL) {
+                forge ret = -1
+                if (pc < _len) { ret = json.gi(ofs_array_get(_pool_ins, _off + pc), "addr", -1) }
+                ofs_array_push(cs_script, script_name)
+                ofs_array_push(cs_addr, ret)
+                if (!load_script(json.gs(ins, "target", ""), 0)) {
+                    bx.sarr_truncate(cs_script, ofs_array_len(cs_script) - 1)
+                    bx.arr_truncate(cs_addr, ofs_array_len(cs_addr) - 1)
+                }
+            } else if (k == O_RETURN) {
+                _return_from_call()
+            } else if (k == O_CHAPTER) {
+                json.put_s(scene, "chapter", json.gs(ins, "title", ""))
+                _emit(ins)
+            } else if (k == O_BG) {
+                json.put_s(scene, "bg", tx.upper(json.gs(ins, "file", "")))
+                if (ext) { mark_seen(json.gs(ins, "file", "")) }
+                _emit(ins)
+            } else if (k == O_CHAR) {
+                forge chars = json.get(scene, "chars")
+                forge slot = json.gi(ins, "slot", 0)
+                forge cn = json.at(chars, slot)
+                if (cn >= 0) {
+                    forge nv = json.str(tx.upper(json.gs(ins, "file", "")))
+                    _set_at(chars, slot, nv)
+                }
+                _emit(ins)
+            } else if (k == O_LAYER_MODE) {
+                json.put_i(scene, "layer_mode", json.gi(ins, "mode", 0))
+            } else if (k == O_AUDIO) {
+                if (json.gi(ins, "channel", 0) == 0) {
+                    json.put_s(scene, "bgm", json.gs(ins, "file", ""))
+                    json.put(scene, "bgm_loop", json.clone(json.get(ins, "loop")))
+                }
+                _emit(ins)
+            } else if (k == O_STOP_AUDIO) {
+                if (json.gi(ins, "channel", 0) == 0) { json.put_s(scene, "bgm", "") }
+                _emit(ins)
+            } else if (k == O_TRANSITION) {
+                commit_layers()
+                block_addr = json.gi(ins, "addr", 0)
+                return ins
+            } else if (k == O_END) {
+                if (_return_from_call()) { continue }
+                block_addr = json.gi(ins, "addr", 0)
+                return ins
+            } else if (k == O_BLOCK) {
+                block_addr = json.gi(ins, "addr", 0)
+                return ins
+            } else if (ext && k == O_DECK_NEW) {
+                _deck_new(json.ival(_arg(ins, 0)))
+            } else if (ext && k == O_DECK_DRAW) {
+                _put(vars, json.ival(_arg(ins, 0)), _deck_draw())
+            } else if (ext && k == O_GFLAG_GET) {
+                _globals()
+                _put(flags, json.ival(_arg(ins, 0)), _get(gflags, json.ival(_arg(ins, 1))))
+            } else if (ext && k == O_GFLAG_SET) {
+                _globals()
+                forge gv = 0
+                if (json.ival(_arg(ins, 1)) != 0) { gv = 1 }
+                _put(gflags, json.ival(_arg(ins, 0)), gv)
+                globals_dirty = true
+            } else if (ext && k == O_SEEN_GET) {
+                forge sv = 0
+                if (is_seen(json.sval(_arg(ins, 1)))) { sv = 1 }
+                _put(flags, json.ival(_arg(ins, 0)), sv)
+            } else if (ext && k == O_CLEAR_ALL) {
+                _fill(vars, VAR_COUNT)
+                _fill(flags, FLAG_COUNT)
+            } else if (layers && k >= O_LX_LOAD && k <= O_MK_POS) {
+                _layer_op(k, ins)
+            } else if (layers && k == O_UI) {
+                _ui_op(ins)
+            }
+            // O_UNKNOWN: configuracao de tela / opcodes nao mapeados (0x2d, 0x2f, 0x30-0x3f, 0x41-0x57...) sem efeito aqui
+        }
+        forge st = json.obj()
+        json.put_s(st, "op", "stall")
+        json.put_i(st, "addr", block_addr)
+        return st
+    }
+
+    vein _rgb(ins: stone, i: stone) -> stone {
+        return ((json.ival(_arg(ins, i)) & 255) << 16) | ((json.ival(_arg(ins, i + 1)) & 255) << 8) | (json.ival(_arg(ins, i + 2)) & 255)
+    }
+
+    vein _rect(ins: stone, at: stone, n: stone) -> void {
+        forge i = 0
+        while (i < n) {
+            ofs_array_set(ui_rects, at + i, json.ival(_arg(ins, i)))
+            i++
+        }
+    }
+
+    // Opcodes de UI (so o INIT os usa). Handlers do EXE: 0x40b520.. (tabela 0x43c264).
+    vein _ui_op(ins: stone) -> void {
+        forge op = json.gs(ins, "op", "")
+        if (tx.eq(op, "op_2d")) {
+            ui_icon = tx.upper(json.sval(_arg(ins, 0)))
+            ui_icon_frames = json.ival(_arg(ins, 1))
+        } else if (tx.eq(op, "op_2f")) {
+            ui_win = tx.upper(json.sval(_arg(ins, 0)))
+            ui_win_x = json.ival(_arg(ins, 1))
+            ui_win_y = json.ival(_arg(ins, 2))
+            ui_txt_x = json.ival(_arg(ins, 3))
+            ui_txt_y = json.ival(_arg(ins, 4))
+            ui_icon_x = json.ival(_arg(ins, 5))
+            ui_icon_y = json.ival(_arg(ins, 6))
+        } else if (tx.eq(op, "op_30")) {
+            ui_btn1 = json.ival(_arg(ins, 0))
+        } else if (tx.eq(op, "op_31")) {
+            ui_btn2 = json.ival(_arg(ins, 0))
+        } else if (tx.eq(op, "op_32")) {
+            ui_glob = json.ival(_arg(ins, 0))
+        } else if (tx.eq(op, "op_36")) {
+            ui_delay = json.ival(_arg(ins, 0))
+        } else if (tx.eq(op, "op_37")) {
+            ui_text_rgb = _rgb(ins, 0)
+            ui_shadow_rgb = _rgb(ins, 3)
+            ui_set = true
+        } else if (tx.eq(op, "op_38")) {
+            ui_sel_rgb = _rgb(ins, 0)
+            ui_norm_rgb = _rgb(ins, 3)
+            ui_set = true
+        } else if (tx.eq(op, "op_39")) {
+            ui_linesp = json.ival(_arg(ins, 0))
+        } else if (tx.eq(op, "op_3a")) {
+            _rect(ins, 0, 4)
+        } else if (tx.eq(op, "op_42")) {
+            _rect(ins, 4, 8)
+        } else if (tx.eq(op, "op_4d")) {
+            _rect(ins, 12, 4)
+        } else if (tx.eq(op, "op_41")) {
+            ui_icon_wait = json.ival(_arg(ins, 0))
+        } else if (tx.eq(op, "op_46")) {
+            // grava o ponto de retorno: pc atual + (no EXE) um registro de save com vars/flags/flags globais
+            ret_script = script_name
+            ret_pc = pc
+        }
+    }
+
+    vein _layer_op(k: stone, ins: stone) -> void {
+        forge a0 = _arg(ins, 0)
+        layers_changed = true
+        if (k == O_LX_LOAD) {
+            forge sl = json.ival(a0)
+            if (_slot_ok(sl)) { ofs_array_set(lx_name, sl, tx.upper(json.sval(_arg(ins, 1)))) }
+        } else if (k == O_LX_SHOW) {
+            forge s2 = json.ival(a0)
+            forge on = 0
+            if (json.ival(_arg(ins, 1)) != 0) { on = 1 }
+            if (_slot_ok(s2)) { ofs_array_set(lx_on, s2, on) }
+        } else if (k == O_LX_POS) {
+            forge s3 = json.ival(a0)
+            if (_slot_ok(s3)) {
+                ofs_array_set(lx_x, s3, json.ival(_arg(ins, 1)))
+                ofs_array_set(lx_y, s3, json.ival(_arg(ins, 2)))
+            }
+        } else if (k == O_MK_LOAD) {
+            mk_name = tx.upper(json.sval(a0))
+        } else if (k == O_MK_SHOW) {
+            mk_on = 0
+            if (json.ival(a0) != 0) { mk_on = 1 }
+        } else if (k == O_MK_POS) {
+            mk_x = json.ival(a0)
+            mk_y = json.ival(_arg(ins, 1))
+        }
+    }
+
+    vein _layers_json() -> stone {
+        forge o = json.obj()
+        forge a = json.arr()
+        forge i = 0
+        while (i < LX_COUNT) {
+            forge e = json.obj()
+            json.put_s(e, "name", ofs_array_get(lx_name, i))
+            json.put_i(e, "x", ofs_array_get(lx_x, i))
+            json.put_i(e, "y", ofs_array_get(lx_y, i))
+            json.put_i(e, "on", ofs_array_get(lx_on, i))
+            json.push(a, e)
+            i++
+        }
+        json.put(o, "extra", a)
+        forge m = json.obj()
+        json.put_s(m, "name", mk_name)
+        json.put_i(m, "x", mk_x)
+        json.put_i(m, "y", mk_y)
+        json.put_i(m, "on", mk_on)
+        json.put(o, "marker", m)
+        return o
+    }
+
+    vein _layers_from(o: stone) -> void {
+        _layers_reset()
+        if (!json.is_obj(o)) { return }
+        forge c = json.first(json.get(o, "extra"))
+        forge i = 0
+        while (c >= 0 && i < LX_COUNT) {
+            ofs_array_set(lx_name, i, json.gs(c, "name", ""))
+            ofs_array_set(lx_x, i, json.gi(c, "x", 0))
+            ofs_array_set(lx_y, i, json.gi(c, "y", 0))
+            ofs_array_set(lx_on, i, json.gi(c, "on", 0))
+            c = json.next(c)
+            i++
+        }
+        forge m = json.get(o, "marker")
+        mk_name = json.gs(m, "name", "")
+        mk_x = json.gi(m, "x", 0)
+        mk_y = json.gi(m, "y", 0)
+        mk_on = json.gi(m, "on", 0)
+    }
+
+    // Troca o item i de um array JSON (mantem a ordem).
+    vein _set_at(a: stone, i: stone, v: stone) -> void {
+        forge items = json.items(a)
+        forge n = json.arr()
+        forge j = 0
+        while (j < ofs_array_len(items)) {
+            if (j == i) { json.push(n, v) } else { json.push(n, json.clone(ofs_array_get(items, j))) }
+            j++
+        }
+        json.put(scene, "chars", n)
+    }
+
+    // layer_mode 0 mostra so o fundo (sprites somem), 1 compoe sprites por cima.
+    vein commit_layers() -> void {
+        if (json.gi(scene, "layer_mode", 0) == 0) { json.put(scene, "chars", _chars3()) }
+        json.put(scene, "shown_chars", json.clone(json.get(scene, "chars")))
+    }
+
+    // Resultado de escolha/menu (base 1, como no motor original).
+    vein set_result(var_index: stone, value: stone) -> void {
+        _put(vars, var_index, _sat(value))
+    }
+
+    // ── estado para save ─────────────────────────────────────────────────
+    vein _int_array(a: Array<stone>) -> stone {
+        forge o = json.arr()
+        forge i = 0
+        while (i < ofs_array_len(a)) {
+            json.push(o, json.int(ofs_array_get(a, i)))
+            i++
+        }
+        return o
+    }
+
+    vein get_state() -> stone {
+        forge st = json.obj()
+        json.put_s(st, "script", script_name)
+        json.put_i(st, "addr", block_addr)
+        forge cs = json.arr()
+        forge i = 0
+        while (i < ofs_array_len(cs_script)) {
+            forge fr = json.obj()
+            json.put_s(fr, "script", ofs_array_get(cs_script, i))
+            json.put_i(fr, "addr", ofs_array_get(cs_addr, i))
+            json.push(cs, fr)
+            i++
+        }
+        json.put(st, "call_stack", cs)
+        json.put(st, "vars", _int_array(vars))
+        json.put(st, "flags", _int_array(flags))
+        json.put(st, "scene", json.clone(scene))
+        if (layers) { json.put(st, "layers", _layers_json()) }
+        return st
+    }
+
+    vein set_state(st: stone) -> bool {
+        reset()
+        forge v = json.get(st, "vars")
+        forge c = json.first(v)
+        forge i = 0
+        while (c >= 0 && i < VAR_COUNT) {
+            ofs_array_set(vars, i, json.ival(c))
+            c = json.next(c)
+            i++
+        }
+        forge f = json.get(st, "flags")
+        c = json.first(f)
+        i = 0
+        while (c >= 0 && i < FLAG_COUNT) {
+            ofs_array_set(flags, i, json.ival(c))
+            c = json.next(c)
+            i++
+        }
+        forge cs = json.get(st, "call_stack")
+        c = json.first(cs)
+        while (c >= 0) {
+            ofs_array_push(cs_script, json.gs(c, "script", ""))
+            ofs_array_push(cs_addr, json.gi(c, "addr", -1))
+            c = json.next(c)
+        }
+        forge sc = json.get(st, "scene")
+        c = json.first(sc)
+        while (c >= 0) {
+            json.put(scene, json.key(c), json.clone(c))
+            c = json.next(c)
+        }
+        if (layers) { _layers_from(json.get(st, "layers")) }
+        forge addr = json.gi(st, "addr", 0)
+        if (!load_script(json.gs(st, "script", "INIT"), addr)) { return false }
+        block_addr = addr
+        return true
+    }
+}

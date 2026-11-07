@@ -1,0 +1,14 @@
+{
+  "meta": { "game": "moon", "lang": "pt-BR", "author": "Comunidade", "version": "1.0", "base": "en" },
+  "strings": {
+    "DAY01A": {
+      "5": { "title": "Dia 1 －－－－－－－" },
+      "114": { "text": "Quando desci do caminhão, já estávamos dentro de um prédio." },
+      "190": { "text": "Eles devem gostar de manter as coisas em segredo." },
+      "238": { "text": "Mas, apesar disso, nenhum de nós desconfiava deles." },
+      "342": { "speaker": "Haruka", "text": "Esses caras não ligariam nem se isto fosse uma estação espacial." },
+      "4516": { "options": ["\"Claro.\"", "\"Deve haver algo mais importante para fazer...\""] }
+    }
+  },
+  "images": {}
+}

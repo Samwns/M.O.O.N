@@ -1,0 +1,639 @@
+// M.O.O.N — memoria crua, arquivos binarios, buffer de bytes e texto.
+// Livre de plataforma: so usa libc (fopen/fread/mkdir/opendir), que existe
+// tanto na glibc (desktop) quanto na bionic (Android).
+//
+// Convencao: um "buffer" e um endereco (stone) devolvido por ofs_alloc;
+// o tamanho do ultimo arquivo lido fica em bx.last_len.
+//
+// Contorno de compilador: `arr[i] = v` nao tem efeito no binario nativo
+// (ver COMPILER_ISSUES.md) — sempre usar ofs_array_set.
+
+extern vein fopen(path: obsidian, mode: obsidian) -> *stone
+extern vein fclose(f: *stone) -> stone
+extern vein fread(buf: *stone, sz: stone, n: stone, f: *stone) -> stone
+extern vein fwrite(buf: *stone, sz: stone, n: stone, f: *stone) -> stone
+extern vein fseek(f: *stone, offset: stone, whence: stone) -> stone
+extern vein ftell(f: *stone) -> stone
+extern vein ofs_alloc(size: stone) -> *stone
+extern vein ofs_free(ptr: *stone) -> void
+extern vein memcpy(dst: *stone, src: *stone, size: stone) -> *stone
+extern vein mkdir(path: obsidian, mode: stone) -> stone
+extern vein opendir(path: obsidian) -> *stone
+extern vein readdir(d: *stone) -> *stone
+extern vein closedir(d: *stone) -> stone
+extern vein remove(path: obsidian) -> stone
+extern vein rmdir(path: obsidian) -> stone
+extern vein strlen(s: obsidian) -> stone
+
+namespace bx {
+    forge last_len: stone = 0
+
+    // ── memoria ──────────────────────────────────────────────────────────
+    vein gb(base: stone, i: stone) -> stone {
+        forge p: *u8 = (base + i) as *u8
+        forge v: u8 = 0 as u8
+        fracture {
+            v = *p;
+        }
+        return (v as stone) & 255
+    }
+
+    vein pb(base: stone, i: stone, v: stone) -> void {
+        forge p: *u8 = (base + i) as *u8
+        forge b: u8 = (v & 255) as u8
+        fracture {
+            *p = b;
+        }
+    }
+
+    vein u16(base: stone, i: stone) -> stone {
+        return gb(base, i) | (gb(base, i + 1) << 8)
+    }
+
+    vein u32(base: stone, i: stone) -> stone {
+        return gb(base, i) | (gb(base, i + 1) << 8) | (gb(base, i + 2) << 16) | (gb(base, i + 3) << 24)
+    }
+
+    vein i32(base: stone, i: stone) -> stone {
+        forge v = u32(base, i)
+        if (v >= 2147483648) { v = v - 4294967296 }
+        return v
+    }
+
+    vein put32(base: stone, i: stone, v: stone) -> void {
+        pb(base, i, v)
+        pb(base, i + 1, v >> 8)
+        pb(base, i + 2, v >> 16)
+        pb(base, i + 3, v >> 24)
+    }
+
+    vein alloc(n: stone) -> stone {
+        forge p: *stone = ofs_alloc(n + 8)
+        return p as stone
+    }
+
+    vein free(b: stone) -> void {
+        if (b != 0) { ofs_free(b as *stone) }
+    }
+
+    vein copy(dst: stone, src: stone, n: stone) -> void {
+        if (n > 0) { memcpy(dst as *stone, src as *stone, n) }
+    }
+
+    // Trunca um Array (cabecalho do runtime: [data, len, cap, esz]).
+    vein arr_truncate(a: Array<stone>, n: stone) -> void {
+        forge p: *stone = fault_step((a as stone) as *stone, 1)
+        fracture {
+            *p = n;
+        }
+    }
+
+    vein sarr_truncate(a: Array<obsidian>, n: stone) -> void {
+        forge p: *stone = fault_step((a as stone) as *stone, 1)
+        fracture {
+            *p = n;
+        }
+    }
+
+    // ── arquivos ─────────────────────────────────────────────────────────
+    vein exists(path: obsidian) -> bool {
+        forge f = fopen(path, "rb")
+        if (f == null) { return false }
+        fclose(f)
+        return true
+    }
+
+    vein is_dir(path: obsidian) -> bool {
+        forge d = opendir(path)
+        if (d == null) { return false }
+        closedir(d)
+        return true
+    }
+
+    // Le o arquivo inteiro (aceita /proc, onde ftell nao da o tamanho).
+    // Devolve 0 se falhar; o tamanho fica em last_len. Termina com NUL.
+    vein read_file(path: obsidian) -> stone {
+        last_len = 0
+        forge f = fopen(path, "rb")
+        if (f == null) { return 0 }
+        forge cap = 65536
+        fseek(f, 0, 2)
+        forge sz = ftell(f)
+        fseek(f, 0, 0)
+        if (sz > 0) { cap = sz + 1 }
+        forge buf = alloc(cap)
+        forge len = 0
+        while (true) {
+            if (len >= cap) {
+                forge nc = cap * 2
+                forge nb = alloc(nc)
+                copy(nb, buf, len)
+                free(buf)
+                buf = nb
+                cap = nc
+            }
+            forge got = fread((buf + len) as *stone, 1, cap - len, f)
+            if (got <= 0) { break }
+            len = len + got
+        }
+        fclose(f)
+        pb(buf, len, 0)
+        last_len = len
+        return buf
+    }
+
+    // Le n bytes a partir de off (pacotes de 1 GB nao cabem inteiros).
+    vein read_at(path: obsidian, off: stone, n: stone) -> stone {
+        last_len = 0
+        forge f = fopen(path, "rb")
+        if (f == null) { return 0 }
+        forge buf = alloc(n + 1)
+        fseek(f, off, 0)
+        forge got = fread(buf as *stone, 1, n, f)
+        fclose(f)
+        if (got < 0) { got = 0 }
+        pb(buf, got, 0)
+        last_len = got
+        return buf
+    }
+
+    vein read_text(path: obsidian) -> obsidian {
+        forge b = read_file(path)
+        if (b == 0) { return "" }
+        return b as obsidian
+    }
+
+    vein write_file(path: obsidian, buf: stone, n: stone) -> bool {
+        forge f = fopen(path, "wb")
+        if (f == null) { return false }
+        if (n > 0) { fwrite(buf as *stone, 1, n, f) }
+        fclose(f)
+        return true
+    }
+
+    vein write_text(path: obsidian, s: obsidian) -> bool {
+        return write_file(path, s as stone, strlen(s))
+    }
+
+    vein copy_file(src: obsidian, dst: obsidian) -> bool {
+        forge b = read_file(src)
+        if (b == 0) { return false }
+        forge ok = write_file(dst, b, last_len)
+        free(b)
+        return ok
+    }
+
+    vein delete(path: obsidian) -> bool {
+        return remove(path) == 0
+    }
+
+    vein mkdir_p(path: obsidian) -> void {
+        forge n = strlen(path)
+        forge i = 1
+        while (i <= n) {
+            if (i == n || gb(path as stone, i) == 47) {
+                mkdir(tx.sub(path, 0, i), 493)
+            }
+            i++
+        }
+    }
+
+    // Lista nomes (sem "." e "..") de um diretorio. want: 0 = tudo,
+    // 1 = so arquivos, 2 = so diretorios (via d_type; 0 = desconhecido conta como arquivo).
+    vein list_dir(path: obsidian, want: stone) -> Array<obsidian> {
+        forge out: Array<obsidian> = []
+        forge d = opendir(path)
+        if (d == null) { return out }
+        while (true) {
+            forge ent = readdir(d)
+            if (ent == null) { break }
+            forge typ = gb(ent as stone, 18)
+            forge name = tx.copy(((ent as stone) + 19) as obsidian)
+            if (!(tx.eq(name, ".") || tx.eq(name, ".."))) {
+                forge isd = typ == 4
+                if (want == 0 || (want == 1 && !isd) || (want == 2 && isd)) {
+                    ofs_array_push(out, name)
+                }
+            }
+        }
+        closedir(d)
+        return tx.sort(out)
+    }
+
+    vein remove_tree(path: obsidian) -> void {
+        forge files = list_dir(path, 1)
+        forge i = 0
+        while (i < ofs_array_len(files)) {
+            forge f: obsidian = ofs_array_get(files, i)
+            remove(path + "/" + f)
+            i++
+        }
+        forge dirs = list_dir(path, 2)
+        i = 0
+        while (i < ofs_array_len(dirs)) {
+            forge d: obsidian = ofs_array_get(dirs, i)
+            remove_tree(path + "/" + d)
+            i++
+        }
+        rmdir(path)
+    }
+
+    vein copy_tree(src: obsidian, dst: obsidian) -> void {
+        mkdir_p(dst)
+        forge files = list_dir(src, 1)
+        forge i = 0
+        while (i < ofs_array_len(files)) {
+            forge f: obsidian = ofs_array_get(files, i)
+            copy_file(src + "/" + f, dst + "/" + f)
+            i++
+        }
+        forge dirs = list_dir(src, 2)
+        i = 0
+        while (i < ofs_array_len(dirs)) {
+            forge d: obsidian = ofs_array_get(dirs, i)
+            copy_tree(src + "/" + d, dst + "/" + d)
+            i++
+        }
+    }
+}
+
+// ── buffer de bytes crescente (montar JSON, PNG, texto grande) ──────────
+namespace sb {
+    forge _ptr: Array<stone> = []
+    forge _len: Array<stone> = []
+    forge _cap: Array<stone> = []
+    forge _free: Array<stone> = []
+
+    vein new() -> stone {
+        forge cap = 256
+        if (ofs_array_len(_free) > 0) {
+            forge id: stone = ofs_array_get(_free, ofs_array_len(_free) - 1)
+            bx.arr_truncate(_free, ofs_array_len(_free) - 1)
+            ofs_array_set(_len, id, 0)
+            return id
+        }
+        ofs_array_push(_ptr, bx.alloc(cap))
+        ofs_array_push(_len, 0)
+        ofs_array_push(_cap, cap)
+        return ofs_array_len(_ptr) - 1
+    }
+
+    // Devolve o buffer para reuso (o conteudo e invalidado).
+    vein drop(id: stone) -> void {
+        ofs_array_push(_free, id)
+    }
+
+    vein len(id: stone) -> stone {
+        return ofs_array_get(_len, id)
+    }
+
+    vein ptr(id: stone) -> stone {
+        return ofs_array_get(_ptr, id)
+    }
+
+    vein reserve(id: stone, extra: stone) -> void {
+        forge l: stone = ofs_array_get(_len, id)
+        forge c: stone = ofs_array_get(_cap, id)
+        if (l + extra + 1 <= c) { return }
+        forge nc = c * 2
+        while (nc < l + extra + 1) { nc = nc * 2 }
+        forge nb = bx.alloc(nc)
+        forge ob: stone = ofs_array_get(_ptr, id)
+        bx.copy(nb, ob, l)
+        bx.free(ob)
+        ofs_array_set(_ptr, id, nb)
+        ofs_array_set(_cap, id, nc)
+    }
+
+    vein byte(id: stone, b: stone) -> void {
+        reserve(id, 1)
+        forge l: stone = ofs_array_get(_len, id)
+        bx.pb(ofs_array_get(_ptr, id), l, b)
+        ofs_array_set(_len, id, l + 1)
+    }
+
+    vein bytes(id: stone, src: stone, n: stone) -> void {
+        if (n <= 0) { return }
+        reserve(id, n)
+        forge l: stone = ofs_array_get(_len, id)
+        forge p: stone = ofs_array_get(_ptr, id)
+        bx.copy(p + l, src, n)
+        ofs_array_set(_len, id, l + n)
+    }
+
+    vein add(id: stone, s: obsidian) -> void {
+        bytes(id, s as stone, strlen(s))
+    }
+
+    vein num(id: stone, v: stone) -> void {
+        add(id, ofs_stone_to_obsidian(v))
+    }
+
+    vein u32be(id: stone, v: stone) -> void {
+        byte(id, v >> 24)
+        byte(id, v >> 16)
+        byte(id, v >> 8)
+        byte(id, v)
+    }
+
+    // Copia o conteudo como string (terminada em NUL).
+    vein str(id: stone) -> obsidian {
+        forge l: stone = ofs_array_get(_len, id)
+        forge out = bx.alloc(l + 1)
+        bx.copy(out, ofs_array_get(_ptr, id), l)
+        bx.pb(out, l, 0)
+        return out as obsidian
+    }
+
+    vein write(id: stone, path: obsidian) -> bool {
+        return bx.write_file(path, ofs_array_get(_ptr, id), ofs_array_get(_len, id))
+    }
+}
+
+// ── texto (bytes UTF-8) ──────────────────────────────────────────────────
+namespace tx {
+    vein len(s: obsidian) -> stone {
+        if (s == null) { return 0 }
+        return strlen(s)
+    }
+
+    vein at(s: obsidian, i: stone) -> stone {
+        return bx.gb(s as stone, i)
+    }
+
+    vein eq(a: obsidian, b: obsidian) -> bool {
+        return ofs_str_eq(a, b)
+    }
+
+    vein sub(s: obsidian, start: stone, n: stone) -> obsidian {
+        forge l = len(s)
+        if (start < 0) { start = 0 }
+        if (start >= l || n <= 0) { return "" }
+        if (start + n > l) { n = l - start }
+        forge out = bx.alloc(n + 1)
+        bx.copy(out, (s as stone) + start, n)
+        bx.pb(out, n, 0)
+        return out as obsidian
+    }
+
+    vein copy(s: obsidian) -> obsidian {
+        return sub(s, 0, len(s))
+    }
+
+    vein from_bytes(p: stone, n: stone) -> obsidian {
+        forge out = bx.alloc(n + 1)
+        bx.copy(out, p, n)
+        bx.pb(out, n, 0)
+        return out as obsidian
+    }
+
+    vein upper(s: obsidian) -> obsidian {
+        forge n = len(s)
+        forge out = bx.alloc(n + 1)
+        forge i = 0
+        while (i < n) {
+            forge c = at(s, i)
+            if (c >= 97 && c <= 122) { c = c - 32 }
+            bx.pb(out, i, c)
+            i++
+        }
+        bx.pb(out, n, 0)
+        return out as obsidian
+    }
+
+    vein lower(s: obsidian) -> obsidian {
+        forge n = len(s)
+        forge out = bx.alloc(n + 1)
+        forge i = 0
+        while (i < n) {
+            forge c = at(s, i)
+            if (c >= 65 && c <= 90) { c = c + 32 }
+            bx.pb(out, i, c)
+            i++
+        }
+        bx.pb(out, n, 0)
+        return out as obsidian
+    }
+
+    vein starts(s: obsidian, p: obsidian) -> bool {
+        forge n = len(p)
+        if (len(s) < n) { return false }
+        forge i = 0
+        while (i < n) {
+            if (at(s, i) != at(p, i)) { return false }
+            i++
+        }
+        return true
+    }
+
+    vein ends(s: obsidian, p: obsidian) -> bool {
+        forge n = len(p)
+        forge l = len(s)
+        if (l < n) { return false }
+        forge i = 0
+        while (i < n) {
+            if (at(s, l - n + i) != at(p, i)) { return false }
+            i++
+        }
+        return true
+    }
+
+    // Indice do primeiro byte c a partir de from, ou -1.
+    vein find(s: obsidian, c: stone, from: stone) -> stone {
+        forge n = len(s)
+        forge i = from
+        while (i < n) {
+            if (at(s, i) == c) { return i }
+            i++
+        }
+        return -1
+    }
+
+    vein rfind(s: obsidian, c: stone) -> stone {
+        forge i = len(s) - 1
+        while (i >= 0) {
+            if (at(s, i) == c) { return i }
+            i--
+        }
+        return -1
+    }
+
+    // Igual ao strip_edges do Godot: remove bytes <= 32 nas pontas.
+    vein strip(s: obsidian) -> obsidian {
+        forge n = len(s)
+        forge a = 0
+        while (a < n && at(s, a) <= 32) { a++ }
+        forge b = n
+        while (b > a && at(s, b - 1) <= 32) { b-- }
+        if (a == 0 && b == n) { return s }
+        return sub(s, a, b - a)
+    }
+
+    // "DAY01A.SNX" -> "DAY01A" (como get_basename: tira a ultima extensao)
+    vein basename(s: obsidian) -> obsidian {
+        forge d = rfind(s, 46)
+        forge sl = rfind(s, 47)
+        if (d <= sl) { return s }
+        return sub(s, 0, d)
+    }
+
+    vein extension(s: obsidian) -> obsidian {
+        forge d = rfind(s, 46)
+        forge sl = rfind(s, 47)
+        if (d <= sl) { return "" }
+        return sub(s, d + 1, len(s) - d - 1)
+    }
+
+    vein file_name(s: obsidian) -> obsidian {
+        forge sl = rfind(s, 47)
+        if (sl < 0) { return s }
+        return sub(s, sl + 1, len(s) - sl - 1)
+    }
+
+    vein dir_name(s: obsidian) -> obsidian {
+        forge sl = rfind(s, 47)
+        if (sl < 0) { return "." }
+        if (sl == 0) { return "/" }
+        return sub(s, 0, sl)
+    }
+
+    vein to_int(s: obsidian) -> stone {
+        forge n = len(s)
+        forge i = 0
+        forge neg = false
+        while (i < n && at(s, i) <= 32) { i++ }
+        if (i < n && at(s, i) == 45) {
+            neg = true
+            i++
+        } else if (i < n && at(s, i) == 43) {
+            i++
+        }
+        forge v = 0
+        while (i < n && at(s, i) >= 48 && at(s, i) <= 57) {
+            v = v * 10 + (at(s, i) - 48)
+            i++
+        }
+        if (neg) { return 0 - v }
+        return v
+    }
+
+    vein is_int(s: obsidian) -> bool {
+        forge n = len(s)
+        if (n == 0) { return false }
+        forge i = 0
+        if (at(s, 0) == 45 || at(s, 0) == 43) { i = 1 }
+        if (i >= n) { return false }
+        while (i < n) {
+            if (at(s, i) < 48 || at(s, i) > 57) { return false }
+            i++
+        }
+        return true
+    }
+
+    vein num(v: stone) -> obsidian {
+        return ofs_stone_to_obsidian(v)
+    }
+
+    // Hex com 2 digitos minimos, minusculo ("%02x").
+    vein hex2(v: stone) -> obsidian {
+        forge d = "0123456789abcdef"
+        forge out = ""
+        forge x = v
+        if (x == 0) { out = "0" }
+        while (x > 0) {
+            out = sub(d, x & 15, 1) + out
+            x = x >> 4
+        }
+        if (len(out) < 2) { out = "0" + out }
+        return out
+    }
+
+    vein cmp(a: obsidian, b: obsidian) -> stone {
+        forge la = len(a)
+        forge lb = len(b)
+        forge i = 0
+        while (i < la && i < lb) {
+            forge x = at(a, i)
+            forge y = at(b, i)
+            if (x != y) { return x - y }
+            i++
+        }
+        return la - lb
+    }
+
+    // Ordena (insercao binaria; listas pequenas/medias).
+    vein sort(a: Array<obsidian>) -> Array<obsidian> {
+        forge out: Array<obsidian> = []
+        forge n = ofs_array_len(a)
+        forge i = 0
+        while (i < n) {
+            forge v: obsidian = ofs_array_get(a, i)
+            forge lo = 0
+            forge hi = ofs_array_len(out)
+            while (lo < hi) {
+                forge mid = (lo + hi) / 2
+                forge m: obsidian = ofs_array_get(out, mid)
+                if (cmp(m, v) <= 0) { lo = mid + 1 } else { hi = mid }
+            }
+            ofs_array_push(out, v)
+            forge j = ofs_array_len(out) - 1
+            while (j > lo) {
+                forge pv: obsidian = ofs_array_get(out, j - 1)
+                ofs_array_set(out, j, pv)
+                j--
+            }
+            ofs_array_set(out, lo, v)
+            i++
+        }
+        return out
+    }
+
+    // Anexa o codepoint cp em UTF-8 ao buffer sb.
+    vein utf8(b: stone, cp: stone) -> void {
+        if (cp < 128) {
+            sb.byte(b, cp)
+        } else if (cp < 2048) {
+            sb.byte(b, 192 | (cp >> 6))
+            sb.byte(b, 128 | (cp & 63))
+        } else if (cp < 65536) {
+            sb.byte(b, 224 | (cp >> 12))
+            sb.byte(b, 128 | ((cp >> 6) & 63))
+            sb.byte(b, 128 | (cp & 63))
+        } else {
+            sb.byte(b, 240 | (cp >> 18))
+            sb.byte(b, 128 | ((cp >> 12) & 63))
+            sb.byte(b, 128 | ((cp >> 6) & 63))
+            sb.byte(b, 128 | (cp & 63))
+        }
+    }
+
+    // Numero de codepoints UTF-8 entre os bytes [a, b).
+    vein cp_count(s: obsidian, a: stone, b: stone) -> stone {
+        forge n = 0
+        forge i = a
+        while (i < b) {
+            if ((at(s, i) & 192) != 128) { n++ }
+            i++
+        }
+        return n
+    }
+
+    // Argumentos da linha de comando (via /proc/self/cmdline; sem argv no OFS).
+    vein args() -> Array<obsidian> {
+        forge out: Array<obsidian> = []
+        forge b = bx.read_file("/proc/self/cmdline")
+        if (b == 0) { return out }
+        forge n = bx.last_len
+        forge st = 0
+        forge i = 0
+        while (i < n) {
+            if (bx.gb(b, i) == 0) {
+                ofs_array_push(out, from_bytes(b + st, i - st))
+                st = i + 1
+            }
+            i++
+        }
+        if (st < n) { ofs_array_push(out, from_bytes(b + st, n - st)) }
+        return out
+    }
+}

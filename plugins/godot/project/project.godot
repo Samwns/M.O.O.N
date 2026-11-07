@@ -1,0 +1,18 @@
+; Projeto vazio do plugin M.O.O.N Godot. O jogo real vem de --main-pack.
+config_version=5
+
+[application]
+config/name="M.O.O.N Godot 4.7"
+config/features=PackedStringArray("4.7", "Mobile")
+run/main_scene="res://lancador.tscn"
+
+[display]
+window/handheld/orientation=0
+
+[rendering]
+renderer/rendering_method="mobile"
+textures/vram_compression/import_etc2_astc=true
+
+[moon]
+
+motor_proprio=true

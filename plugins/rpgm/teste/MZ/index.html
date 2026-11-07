@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPG Maker MZ (teste)</title>
+<style>
+ body{font-family:sans-serif;background:#16223a;color:#fff;margin:0;padding:16px}
+ button{font-size:28px;padding:14px 22px;margin:6px;border-radius:12px;border:0;background:#8b6cff;color:#101020}
+ pre{background:#0008;padding:10px;font-size:20px;white-space:pre-wrap}
+ h1{margin:4px 0;font-size:32px}
+</style>
+<script src="js/rmmz_core.js"></script>
+</head>
+<body>
+<h1>RPG Maker MZ (teste) (jogo de teste do M.O.O.N)</h1>
+<div>
+ <button onclick="inc()">+1</button>
+ <button onclick="save(1)">Salvar 1</button>
+ <button onclick="load(1)">Carregar 1</button>
+ <button onclick="save(2)">Salvar 2</button>
+ <button onclick="del(1)">Apagar 1</button>
+ <button onclick="big()">Salvar 1 MB</button>
+ <button onclick="window.close()">Sair</button>
+</div>
+<pre id="out"></pre>
+<script>
+var n = 0;
+function log(s){ document.getElementById('out').textContent = s; }
+function info(){
+  var keys=[]; for (var i=0;i<localStorage.length;i++) keys.push(localStorage.key(i)+'('+localStorage.getItem(localStorage.key(i)).length+')');
+  return 'contador='+n+'\nprocess='+typeof process+' require='+typeof require+' nw='+typeof nw+' localforage='+typeof localforage+
+    '\nlocalStorage: '+(keys.join(', ')||'(vazio)')+'\n'+navigator.userAgent.substr(0,70);
+}
+function inc(){ n++; log(info()); }
+function key(s){ return 'rmmzsave.'+s; }
+function save(s){ if (typeof localforage!=='undefined') localforage.setItem(key('F'+s),'forage '+Date.now()); localStorage.setItem(key(s), JSON.stringify({n:n,t:new Date().toISOString()})); log('salvo slot '+s+'\n'+info()); }
+function load(s){ var v=localStorage.getItem(key(s)); if(v){ n=JSON.parse(v).n; log('carregado slot '+s+': '+v+'\n'+info()); } else log('slot '+s+' vazio\n'+info()); }
+function del(s){ localStorage.removeItem(key(s)); log('apagado '+s+'\n'+info()); }
+function big(){ var a=[]; for(var i=0;i<65536;i++) a.push('0123456789abcdef'); localStorage.setItem(key(9), a.join('')); log('salvo 1 MB\n'+info()); }
+window.addEventListener('load', function(){ load(1); });
+</script>
+</body>
+</html>

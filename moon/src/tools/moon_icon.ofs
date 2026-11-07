@@ -1,0 +1,91 @@
+// moon-icon — desenha o icone do M.O.O.N em vetor (raster.ofs) e grava PNG.
+//
+//   moon-icon <saida.png> [tamanho]      (padrao 192)
+//
+// Fundo arredondado roxo-noite em degrade, lua crescente dourada (circulo
+// menos circulo deslocado) e tres estrelas. O alfa vem da cobertura do fundo.
+
+attach {canvas}
+attach {raster}
+attach {F:../core/image.ofs}
+
+extern vein exit(code: stone) -> void
+
+vein rd(p: *stone, i: stone) -> stone {
+    forge q: *stone = fault_step(p, i)
+    forge v = 0
+    fracture { v = *q; }
+    return v
+}
+
+vein star(cv: Canvas, cx: crystal, cy: crystal, r: crystal, color: stone) -> void {
+    raster.begin(0, 0, cv.width, cv.height)
+    forge i = 0
+    while (i <= 8) {
+        forge ang = 0.0 - 90.0 + (i as crystal) * 45.0
+        forge rr = r
+        if (i % 2 == 1) { rr = r * 0.32 }
+        forge x = cx + rr * raster._cos(ang)
+        forge y = cy + rr * raster._sin(ang)
+        if (i == 0) { raster.move_to(x, y) } else { raster.line_to(x, y) }
+        i++
+    }
+    raster.close()
+    raster.fill(cv, color)
+}
+
+core main() {
+    forge a = tx.args()
+    if (ofs_array_len(a) < 2) {
+        echo("uso: moon-icon <saida.png> [tamanho]")
+        exit(2)
+    }
+    forge out: obsidian = ofs_array_get(a, 1)
+    forge n = 192
+    if (ofs_array_len(a) > 2) { n = tx.to_int(ofs_array_get(a, 2)) }
+    forge s = (n as crystal) / 192.0
+
+    // mascara do fundo (branco = opaco)
+    forge mask = canvas.create(n, n)
+    canvas.clear(mask, 0)
+    raster.fill_round_rect(mask, 0.0, 0.0, n as crystal, n as crystal, 44.0 * s, 16777215)
+
+    // arte
+    forge cv = canvas.create(n, n)
+    canvas.fill_gradient_v(cv, 0, 0, n, n, 2627665, 856112)
+    // halo suave atras da lua
+    raster.fill_circle(cv, 92.0 * s, 98.0 * s, 68.0 * s, 788529152 + 16767117)
+    // lua crescente: cobertura do disco A menos a do disco B (com antialias)
+    forge da = canvas.create(n, n)
+    forge db = canvas.create(n, n)
+    canvas.clear(da, 0)
+    canvas.clear(db, 0)
+    raster.fill_circle(da, 92.0 * s, 98.0 * s, 58.0 * s, 16777215)
+    raster.fill_circle(db, 120.0 * s, 76.0 * s, 50.0 * s, 16777215)
+    forge k = 0
+    while (k < n * n) {
+        forge ca = rd(da.buffer, k) & 255
+        forge cb = rd(db.buffer, k) & 255
+        forge al = (ca * (255 - cb)) / 255
+        if (al > 0) { canvas.blend_pixel(cv, k % n, k / n, 16767117, al) }
+        k++
+    }
+    star(cv, 150.0 * s, 52.0 * s, 13.0 * s, 16775371)
+    star(cv, 132.0 * s, 128.0 * s, 8.0 * s, 15526399)
+    star(cv, 52.0 * s, 44.0 * s, 6.0 * s, 15526399)
+
+    forge im = img.new(n, n)
+    forge p = img.px(im)
+    forge i = 0
+    while (i < n * n) {
+        forge v = rd(cv.buffer, i)
+        forge al = rd(mask.buffer, i) & 255
+        bx.pb(p, i * 4, (v >> 16) & 255)
+        bx.pb(p, i * 4 + 1, (v >> 8) & 255)
+        bx.pb(p, i * 4 + 2, v & 255)
+        bx.pb(p, i * 4 + 3, al)
+        i++
+    }
+    img.save_png(im, out, true)
+    echo("icone: " + out + " (" + tx.num(n) + "x" + tx.num(n) + ")")
+}

@@ -1,0 +1,2 @@
+attach {F:lib.ofs}
+vein main() -> stone { return 0 }

@@ -1,0 +1,516 @@
+// M.O.O.N — gerenciador de saves. Pasta unica para todos os motores:
+//   /sdcard/MOON/saves/<motor>/<jogo>/...          (criada para cada jogo da biblioteca)
+//   /sdcard/MOON/export/<motor>_<jogo>_<data>.zip  (exportar)
+//   /sdcard/MOON/backup/<motor>_<jogo>_<data>.zip  (backup; antes de importar/apagar)
+// Motores: moon, renpy, godot, rpgm, tyrano, unity, windows.
+// O zip exportado leva um moonsave.json ({motor, jogo, ...}) para que "importar"
+// saiba para onde vai, em qualquer nivel da tela.
+
+attach {F:lib.ofs}
+attach {F:../core/save.ofs}
+attach {zip}
+attach {sha256}
+
+extern vein time(t: *stone) -> stone
+extern vein localtime_r(t: *stone, tm: *stone) -> *stone
+extern vein stat(path: obsidian, buf: *stone) -> stone
+
+namespace sv {
+    forge base: obsidian = "/storage/emulated/0/MOON"
+    forge saves_dir: obsidian = "/storage/emulated/0/MOON/saves"
+    forge export_dir: obsidian = "/storage/emulated/0/MOON/export"
+    forge backup_dir: obsidian = "/storage/emulated/0/MOON/backup"
+    forge msg: obsidian = ""
+
+    // navegacao: 0 motores, 1 jogos de um motor, 2 arquivos de um jogo
+    forge lvl: stone = 0
+    forge sel_motor: obsidian = ""
+    forge sel_game: obsidian = ""
+    forge del_armed: stone = 0
+
+    // linhas da lista atual
+    forge r_name: Array<obsidian> = []
+    forge r_sub: Array<obsidian> = []
+    forge r_icon: Array<obsidian> = []
+    forge r_key: Array<obsidian> = []
+
+    // candidatos a importar (zips)
+    forge c_path: Array<obsidian> = []
+    forge c_name: Array<obsidian> = []
+    forge c_sub: Array<obsidian> = []
+
+    forge _st: *stone = null
+
+    // chave de pasta de um motor da biblioteca
+    vein motor_key(engine: obsidian) -> obsidian {
+        if (tx.eq(engine, "tactics_moon")) { return "moon" }
+        return engine
+    }
+
+    vein is_motor(m: obsidian) -> bool {
+        return tx.eq(m, "moon") || tx.eq(m, "renpy") || tx.eq(m, "godot") || tx.eq(m, "rpgm") || tx.eq(m, "tyrano") || tx.eq(m, "unity") || tx.eq(m, "windows")
+    }
+
+    // Padronizacao do Ren'Py: o plugin antigo grava em saves/<jogo>/; o padrao novo e saves/renpy/<jogo>/.
+    // So COPIA (nao apaga o original, para o plugin atual continuar achando seus saves) e so se o destino ainda nao existe.
+    vein legacy_renpy() -> stone {
+        forge n = 0
+        forge ds = bx.list_dir(saves_dir, 2)
+        forge i = 0
+        while (i < ofs_array_len(ds)) {
+            forge d: obsidian = ofs_array_get(ds, i)
+            if (!tx.starts(d, ".") && !is_motor(d) && !bx.exists(saves_dir + "/renpy/" + d)) {
+                bx.copy_tree(saves_dir + "/" + d, saves_dir + "/renpy/" + d)
+                n++
+            }
+            i++
+        }
+        return n
+    }
+
+    vein engine_of_motor(m: obsidian) -> obsidian {
+        if (tx.eq(m, "moon")) { return "tactics_moon" }
+        return m
+    }
+
+    vein game_dir(motor: obsidian, gid: obsidian) -> obsidian {
+        return saves_dir + "/" + motor + "/" + gid
+    }
+
+    vein init() -> void {
+        bx.mkdir_p(saves_dir)
+        bx.mkdir_p(export_dir)
+        bx.mkdir_p(backup_dir)
+    }
+
+    // pastas de saves para todos os jogos da biblioteca
+    vein ensure_library() -> void {
+        init()
+        forge i = 0
+        while (i < lib.count()) {
+            forge e: obsidian = ofs_array_get(lib.g_engine, i)
+            forge id: obsidian = ofs_array_get(lib.g_id, i)
+            if (tx.len(e) > 0 && tx.len(id) > 0) { bx.mkdir_p(game_dir(motor_key(e), id)) }
+            i++
+        }
+    }
+
+    vein ensure_game(engine: obsidian, gid: obsidian) -> void {
+        bx.mkdir_p(game_dir(motor_key(engine), gid))
+    }
+
+    // ── tempo ────────────────────────────────────────────────────────────
+    vein _two(v: stone) -> obsidian {
+        if (v < 10) { return "0" + tx.num(v) }
+        return tx.num(v)
+    }
+    // unix -> "AAAA-MM-DD HH:MM" (hora local); sep = 1: "AAAAMMDD-HHMMSS" (nome de arquivo)
+    vein fmt_time(t: stone, for_name: bool) -> obsidian {
+        forge tb = bx.alloc(16)
+        forge tm = bx.alloc(128)
+        bx.put32(tb, 0, t & 4294967295)
+        bx.put32(tb, 4, t >> 32)
+        localtime_r(tb as *stone, tm as *stone)
+        forge y = bx.i32(tm, 20) + 1900
+        forge mo = bx.i32(tm, 16) + 1
+        forge d = bx.i32(tm, 12)
+        forge h = bx.i32(tm, 8)
+        forge mi = bx.i32(tm, 4)
+        forge se = bx.i32(tm, 0)
+        bx.free(tb)
+        bx.free(tm)
+        if (for_name) { return tx.num(y) + _two(mo) + _two(d) + "-" + _two(h) + _two(mi) + _two(se) }
+        return tx.num(y) + "-" + _two(mo) + "-" + _two(d) + " " + _two(h) + ":" + _two(mi)
+    }
+    vein now() -> stone { return save.now_unix() }
+    vein mtime(p: obsidian) -> stone {
+        if (_st == null) { _st = ofs_alloc(256) }
+        if (stat(p, _st) != 0) { return 0 }
+        return android.peek(_st, 11)
+    }
+
+    // ── arquivos de um jogo (recursivo; nomes relativos) ─────────────────
+    vein _walk(dir: obsidian, rel: obsidian, out: Array<obsidian>, depth: stone) -> void {
+        forge fs = bx.list_dir(dir, 1)
+        forge i = 0
+        while (i < ofs_array_len(fs)) {
+            forge f: obsidian = ofs_array_get(fs, i)
+            if (!tx.starts(f, ".") && !tx.ends(f, ".antes")) { ofs_array_push(out, rel + f) }   // .antes: backup, nao aparece
+            i++
+        }
+        if (depth >= 4) { return }
+        forge ds = bx.list_dir(dir, 2)
+        i = 0
+        while (i < ofs_array_len(ds)) {
+            forge d: obsidian = ofs_array_get(ds, i)
+            if (!tx.starts(d, ".")) { _walk(dir + "/" + d, rel + d + "/", out, depth + 1) }
+            i++
+        }
+    }
+    vein files_of(motor: obsidian, gid: obsidian) -> Array<obsidian> {
+        forge out: Array<obsidian> = []
+        _walk(game_dir(motor, gid), "", out, 0)
+        return out
+    }
+    vein _size_of(motor: obsidian, gid: obsidian) -> stone {
+        forge l = files_of(motor, gid)
+        forge tot = 0
+        forge d = game_dir(motor, gid)
+        forge i = 0
+        while (i < ofs_array_len(l)) {
+            tot = tot + lib.file_size(d + "/" + ofs_array_get(l, i))
+            i++
+        }
+        return tot
+    }
+
+    // ── lista (3 niveis) ─────────────────────────────────────────────────
+    vein _row(name: obsidian, sub: obsidian, icon: obsidian, key: obsidian) -> void {
+        ofs_array_push(r_name, name)
+        ofs_array_push(r_sub, sub)
+        ofs_array_push(r_icon, icon)
+        ofs_array_push(r_key, key)
+    }
+
+    vein build() -> void {
+        r_name = []
+        r_sub = []
+        r_icon = []
+        r_key = []
+        if (lvl == 0) {
+            forge ms = bx.list_dir(saves_dir, 2)
+            forge i = 0
+            while (i < ofs_array_len(ms)) {
+                forge m: obsidian = ofs_array_get(ms, i)
+                if (!tx.starts(m, ".") && is_motor(m)) {
+                    forge gs = bx.list_dir(saves_dir + "/" + m, 2)
+                    _row(motor_label(m), tx.num(ofs_array_len(gs)) + " " + tr("sv_jogos"), lib.engine_icon(engine_of_motor(m)), m)
+                }
+                i++
+            }
+        } else if (lvl == 1) {
+            forge gs2 = bx.list_dir(saves_dir + "/" + sel_motor, 2)
+            forge j = 0
+            while (j < ofs_array_len(gs2)) {
+                forge g: obsidian = ofs_array_get(gs2, j)
+                if (!tx.starts(g, ".")) {
+                    forge fl = files_of(sel_motor, g)
+                    _row(game_title(g), tx.num(ofs_array_len(fl)) + " " + tr("sv_arquivos") + " · " + lib.human_size(_size_of(sel_motor, g)), "folder", g)
+                }
+                j++
+            }
+        } else {
+            forge d = game_dir(sel_motor, sel_game)
+            forge fl2 = files_of(sel_motor, sel_game)
+            forge k = 0
+            while (k < ofs_array_len(fl2)) {
+                forge f: obsidian = ofs_array_get(fl2, k)
+                _row(f, fmt_time(mtime(d + "/" + f), false) + " · " + lib.human_size(lib.file_size(d + "/" + f)), "file", f)
+                k++
+            }
+        }
+    }
+
+    vein motor_label(m: obsidian) -> obsidian {
+        if (tx.eq(m, "moon")) { return "MOON." }
+        if (tx.eq(m, "renpy")) { return "Ren'Py" }
+        if (tx.eq(m, "godot")) { return "Godot" }
+        if (tx.eq(m, "rpgm")) { return "RPG Maker" }
+        if (tx.eq(m, "tyrano")) { return "TyranoBuilder" }
+        if (tx.eq(m, "unity")) { return "Unity" }
+        if (tx.eq(m, "windows")) { return "Windows (.exe)" }
+        return m
+    }
+
+    // nome do jogo pelo id (biblioteca) ou o proprio id
+    vein game_title(gid: obsidian) -> obsidian {
+        forge k = lib.find_id(gid)
+        if (k >= 0) { return ofs_array_get(lib.g_name, k) + " (" + gid + ")" }
+        return gid
+    }
+
+    vein msg_text() -> obsidian { return msg }
+    vein rows_count() -> stone { return ofs_array_len(r_name) }
+    vein rows_nome(i: stone) -> obsidian { return ofs_array_get(r_name, i) }
+    vein rows_sub(i: stone) -> obsidian { return ofs_array_get(r_sub, i) }
+    vein rows_icone(i: stone) -> obsidian { return ofs_array_get(r_icon, i) }
+
+    vein crumb() -> obsidian {
+        forge s = "/sdcard/MOON/saves"
+        if (lvl >= 1) { s = s + "/" + sel_motor }
+        if (lvl >= 2) { s = s + "/" + sel_game }
+        return s
+    }
+
+    vein open(i: stone) -> void {
+        forge k: obsidian = ofs_array_get(r_key, i)
+        del_armed = 0
+        msg = ""
+        if (lvl == 0) {
+            sel_motor = k
+            lvl = 1
+            build()
+        } else if (lvl == 1) {
+            sel_game = k
+            lvl = 2
+            build()
+        } else {
+            msg = ofs_array_get(r_name, i) + " · " + ofs_array_get(r_sub, i)
+        }
+    }
+
+    // sobe um nivel; false se ja esta no topo
+    vein up() -> bool {
+        del_armed = 0
+        msg = ""
+        if (lvl == 0) { return false }
+        lvl = lvl - 1
+        build()
+        return true
+    }
+
+    // ── zip: exportar / backup / importar ────────────────────────────────
+    vein _meta(motor: obsidian, gid: obsidian) -> obsidian {
+        forge m = json.mark()
+        forge o = json.obj()
+        json.put_s(o, "formato", "moonsave")
+        json.put_i(o, "versao", 1)
+        json.put_s(o, "motor", motor)
+        json.put_s(o, "jogo", gid)
+        json.put_s(o, "criado", fmt_time(now(), false))
+        forge s = json.stringify(o, "")
+        json.release(m)
+        return s
+    }
+
+    // Zipa os saves do jogo em dest. Devolve quantos arquivos foram.
+    vein zip_game(motor: obsidian, gid: obsidian, dest: obsidian) -> stone {
+        forge l = files_of(motor, gid)
+        forge d = game_dir(motor, gid)
+        if (!zip.create(dest)) { return -1 }
+        zip.add_text("moonsave.json", _meta(motor, gid))
+        forge n = 0
+        forge i = 0
+        while (i < ofs_array_len(l)) {
+            forge f: obsidian = ofs_array_get(l, i)
+            if (zip.add_file(f, d + "/" + f)) { n++ }
+            i++
+        }
+        zip.finish()
+        return n
+    }
+
+    vein export_current() -> bool {
+        if (lvl != 2) { return false }
+        init()
+        forge dest = export_dir + "/" + sel_motor + "_" + sel_game + "_" + fmt_time(now(), true) + ".zip"
+        forge n = zip_game(sel_motor, sel_game, dest)
+        if (n < 0) {
+            msg = tr("sv_erro_zip")
+            return false
+        }
+        msg = tr("sv_exportado") + ": " + dest + " (" + tx.num(n) + " " + tr("sv_arquivos") + ", " + lib.human_size(lib.file_size(dest)) + ")"
+        return true
+    }
+
+    vein backup_current() -> bool {
+        if (lvl != 2) { return false }
+        init()
+        forge dest = backup_dir + "/" + sel_motor + "_" + sel_game + "_" + fmt_time(now(), true) + ".zip"
+        forge n = zip_game(sel_motor, sel_game, dest)
+        if (n < 0) {
+            msg = tr("sv_erro_zip")
+            return false
+        }
+        msg = tr("sv_backup_ok") + ": " + dest + " (" + tx.num(n) + " " + tr("sv_arquivos") + ")"
+        return true
+    }
+
+    // backup de todos os motores/jogos num zip so
+    vein backup_all() -> bool {
+        init()
+        forge dest = backup_dir + "/todos_" + fmt_time(now(), true) + ".zip"
+        if (!zip.create(dest)) {
+            msg = tr("sv_erro_zip")
+            return false
+        }
+        forge n = 0
+        forge ms = bx.list_dir(saves_dir, 2)
+        forge a = 0
+        while (a < ofs_array_len(ms)) {
+            forge m: obsidian = ofs_array_get(ms, a)
+            forge gs = bx.list_dir(saves_dir + "/" + m, 2)
+            forge b = 0
+            while (b < ofs_array_len(gs)) {
+                forge g: obsidian = ofs_array_get(gs, b)
+                forge fl = files_of(m, g)
+                forge c = 0
+                while (c < ofs_array_len(fl)) {
+                    forge f: obsidian = ofs_array_get(fl, c)
+                    if (zip.add_file(m + "/" + g + "/" + f, saves_dir + "/" + m + "/" + g + "/" + f)) { n++ }
+                    c++
+                }
+                b++
+            }
+            a++
+        }
+        zip.finish()
+        msg = tr("sv_backup_ok") + ": " + dest + " (" + tx.num(n) + " " + tr("sv_arquivos") + ")"
+        return true
+    }
+
+    // Apagar os saves do jogo atual (a pasta fica). Dois toques em 5 s; faz backup antes.
+    vein delete_current(now_ms: stone) -> bool {
+        if (lvl != 2) { return false }
+        if (del_armed == 0 || now_ms - del_armed > 5000) {
+            del_armed = now_ms
+            msg = tr("sv_apagar_confirma")
+            return false
+        }
+        del_armed = 0
+        forge l = files_of(sel_motor, sel_game)
+        if (ofs_array_len(l) == 0) {
+            msg = tr("sv_nada_apagar")
+            return false
+        }
+        // rede de seguranca: backup automatico antes de apagar
+        init()
+        forge b = backup_dir + "/" + sel_motor + "_" + sel_game + "_" + fmt_time(now(), true) + "_antes-de-apagar.zip"
+        zip_game(sel_motor, sel_game, b)
+        forge d = game_dir(sel_motor, sel_game)
+        bx.remove_tree(d)
+        bx.mkdir_p(d)
+        msg = tr("sv_apagado") + " (" + tr("sv_backup_auto") + ": " + b + ")"
+        build()
+        return true
+    }
+
+    // Lista zips para importar (Download, export, backup).
+    vein scan_zips() -> void {
+        c_path = []
+        c_name = []
+        c_sub = []
+        _scan_dir("/storage/emulated/0/Download")
+        _scan_dir(export_dir)
+        _scan_dir(backup_dir)
+    }
+    vein _scan_dir(dir: obsidian) -> void {
+        forge fs = bx.list_dir(dir, 1)
+        forge i = 0
+        while (i < ofs_array_len(fs)) {
+            forge f: obsidian = ofs_array_get(fs, i)
+            if (tx.eq(lib.ext_of(f), "zip")) {
+                forge p = dir + "/" + f
+                ofs_array_push(c_path, p)
+                ofs_array_push(c_name, f)
+                ofs_array_push(c_sub, tx.sub(dir, 20, tx.len(dir) - 20) + " · " + lib.human_size(lib.file_size(p)) + " · " + fmt_time(mtime(p), false))
+            }
+            i++
+        }
+    }
+    vein cands_count() -> stone { return ofs_array_len(c_path) }
+    vein cands_nome(i: stone) -> obsidian { return ofs_array_get(c_name, i) }
+    vein cands_sub(i: stone) -> obsidian { return ofs_array_get(c_sub, i) }
+
+    vein _safe_part(s: obsidian) -> bool {
+        forge n = tx.len(s)
+        if (n == 0 || n > 80 || tx.starts(s, ".")) { return false }
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(s, i)
+            if (c == 47 || c == 92 || c == 0) { return false }
+            i++
+        }
+        return true
+    }
+
+    // Importa um zip de saves. Destino: moonsave.json do zip; sem ele, o jogo aberto na tela.
+    vein import_zip(path: obsidian) -> bool {
+        if (!zip.open(path)) {
+            msg = tr("sv_zip_invalido") + ": " + zip.last_error
+            return false
+        }
+        forge motor = sel_motor
+        forge gid = sel_game
+        forge meta = zip.read_text("moonsave.json")
+        forge all_games = false
+        if (tx.len(meta) > 0) {
+            forge m = json.mark()
+            forge o = json.parse(meta)
+            if (json.is_obj(o)) {
+                motor = tx.copy(json.gs(o, "motor", ""))
+                gid = tx.copy(json.gs(o, "jogo", ""))
+            }
+            json.release(m)
+        } else if (lvl < 2) {
+            // zip de "backup de tudo": <motor>/<jogo>/arquivo
+            all_games = true
+        }
+        if (!all_games && (!_safe_part(motor) || !_safe_part(gid))) {
+            zip.close()
+            msg = tr("sv_zip_sem_destino")
+            return false
+        }
+        init()
+        forge n = 0
+        forge z = 0
+        while (z < zip.count()) {
+            forge nm = zip.name(z)
+            if (!zip.is_dir(z) && !tx.eq(nm, "moonsave.json")) {
+                if (!zip.safe_name(nm)) {
+                    zip.close()
+                    msg = tr("sv_zip_invalido") + ": " + nm
+                    return false
+                }
+                forge dest = game_dir(motor, gid) + "/" + nm
+                if (all_games) { dest = saves_dir + "/" + nm }
+                // backup do arquivo que sera sobrescrito fica em .antes (uma geracao)
+                if (bx.exists(dest)) { bx.copy_file(dest, dest + ".antes") }
+                if (zip.extract(z, dest)) { n++ }
+            }
+            z++
+        }
+        zip.close()
+        if (n == 0) {
+            msg = tr("sv_zip_vazio")
+            return false
+        }
+        msg = tr("sv_importado") + ": " + tx.num(n) + " " + tr("sv_arquivos")
+        build()
+        return true
+    }
+
+    // migra files/saves/<id>/ do app para /sdcard/MOON/saves/moon/<id>/ sem perder nada:
+    // copia, confere arquivo a arquivo (existencia e tamanho) e so entao apaga o original.
+    vein migrate_moon(old_root: obsidian) -> stone {
+        forge moved = 0
+        if (!bx.is_dir(old_root)) { return 0 }
+        init()
+        forge ds = bx.list_dir(old_root, 2)
+        forge a = 0
+        while (a < ofs_array_len(ds)) {
+            forge g: obsidian = ofs_array_get(ds, a)
+            forge src = old_root + "/" + g
+            forge dst = game_dir("moon", g)
+            bx.copy_tree(src, dst)
+            if (_same_tree(src, dst)) {
+                bx.remove_tree(src)
+                moved++
+            }
+            a++
+        }
+        return moved
+    }
+    vein _same_tree(src: obsidian, dst: obsidian) -> bool {
+        forge l: Array<obsidian> = []
+        _walk(src, "", l, 0)
+        forge i = 0
+        while (i < ofs_array_len(l)) {
+            forge f: obsidian = ofs_array_get(l, i)
+            if (lib.file_size(src + "/" + f) != lib.file_size(dst + "/" + f)) { return false }
+            if (!bx.exists(dst + "/" + f)) { return false }
+            i++
+        }
+        return true
+    }
+}

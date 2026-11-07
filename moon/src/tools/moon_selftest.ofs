@@ -1,0 +1,105 @@
+// moon-selftest — testes de save.ofs e patch.ofs sem janela.
+//
+//   moon-selftest --game <pasta importada> --work <pasta temporaria> [--patch arq.json]
+//
+// Gera <work>/template.json (comparavel ao export_template do Godot), instala o
+// patch, ativa, aplica numa instrucao, desinstala; grava/le saves e confere
+// slots(), latest() e delete_slot().
+
+attach {F:../core/vm.ofs}
+attach {F:../core/save.ofs}
+attach {F:../core/patch.ofs}
+
+extern vein exit(code: stone) -> void
+
+namespace st {
+    forge fails: stone = 0
+
+    vein check(name: obsidian, ok: bool) -> void {
+        if (ok) {
+            echo("OK     " + name)
+        } else {
+            echo("FALHA  " + name)
+            fails++
+        }
+    }
+}
+
+core main() {
+    forge a = tx.args()
+    forge game = ""
+    forge work = "/tmp/moon-selftest"
+    forge pfile = ""
+    forge i = 1
+    while (i < ofs_array_len(a)) {
+        forge k: obsidian = ofs_array_get(a, i)
+        forge v = ""
+        if (i + 1 < ofs_array_len(a)) { v = ofs_array_get(a, i + 1) }
+        if (tx.eq(k, "--game")) { game = v; i++ }
+        else if (tx.eq(k, "--work")) { work = v; i++ }
+        else if (tx.eq(k, "--patch")) { pfile = v; i++ }
+        i++
+    }
+    if (tx.len(game) == 0) {
+        echo("uso: moon-selftest --game <pasta importada> --work <dir> [--patch arq.json]")
+        exit(2)
+    }
+    bx.mkdir_p(work)
+
+    // ── patch ──
+    patch.init(work + "/patches", work + "/settings.json")
+    forge n = patch.export_template("moon", game + "/scripts", work + "/template.json", "en")
+    echo("TEMPLATE " + tx.num(n))
+    st.check("template tem entradas", n > 0)
+    if (tx.len(pfile) > 0) {
+        forge id = patch.install("moon", pfile, save.now_unix())
+        st.check("install " + id + " " + patch.error, tx.len(id) > 0)
+        forge lst = patch.list_patches("moon")
+        echo("LIST   " + json.stringify(lst, ""))
+        st.check("list_patches = 1", json.count(lst) == 1)
+        patch.activate("moon", id)
+        st.check("active_id", tx.eq(patch.active_id("moon"), id))
+        st.check("base_lang en", tx.eq(patch.base_lang(), "en"))
+        forge ins = json.parse("{\"addr\":342,\"op\":\"say\",\"speaker\":\"\",\"text\":\"x\"}")
+        forge out = patch.apply("DAY01A.SNX", ins)
+        echo("APPLY  " + json.stringify(out, ""))
+        st.check("apply troca texto", !tx.eq(json.gs(out, "text", ""), "x"))
+        forge wrong = patch.install("moon", work + "/nao_existe.bin", 1)
+        st.check("install invalido recusa (" + patch.error + ")", tx.len(wrong) == 0)
+        patch.uninstall("moon", id)
+        st.check("uninstall limpa ativo", tx.len(patch.active_id("moon")) == 0)
+        st.check("uninstall remove pasta", json.count(patch.list_patches("moon")) == 0)
+    }
+
+    // ── save ──
+    save.set_root(work + "/saves")
+    vm.init(game + "/scripts")
+    vm.load_script("DAY01A", 0)
+    forge b1 = vm.run()
+    forge s1 = vm.get_state()
+    st.check("save slot01", save.save_slot("moon", "slot01", s1, -1))
+    forge b2 = vm.run()
+    forge s2 = vm.get_state()
+    st.check("save quick", save.save_slot("moon", save.QUICK, s2, -1))
+    forge l1 = save.load_slot("moon", "slot01")
+    st.check("load slot01 addr", json.gi(l1, "addr", -1) == json.gi(b1, "addr", -2))
+    st.check("saved_at", tx.len(json.gs(l1, "saved_at", "")) == 19)
+    st.check("slots() = 13", ofs_array_len(save.slots()) == 13)
+    forge lt = save.latest("moon")
+    st.check("latest existe", lt >= 0)
+    st.check("load inexistente = -1", save.load_slot("moon", "slot09") < 0)
+    save.delete_slot("moon", "slot01")
+    st.check("delete_slot", save.load_slot("moon", "slot01") < 0)
+    // um save no formato do Godot (numeros float) tambem carrega
+    forge gsave = json.parse("{\"script\":\"DAY01A\",\"addr\":342.0,\"call_stack\":[],\"vars\":[1.0,2.0],\"flags\":[0.0,1.0],\"scene\":{\"bg\":\"BG001\",\"bgm\":\"mon_cd02\"},\"unix\":1761412345.678}")
+    st.check("set_state com floats do Godot", vm.set_state(gsave))
+    st.check("vars[1] = 2", ofs_array_get(vm.vars, 1) == 2)
+    st.check("flags[1] = 1", ofs_array_get(vm.flags, 1) == 1)
+    forge nx = vm.run()
+    echo("RESUME " + json.stringify(nx, ""))
+    st.check("retoma no addr 342", json.gi(nx, "addr", -1) == 342)
+    save.delete_slot("moon", save.QUICK)
+    echo("RESULT falhas=" + tx.num(st.fails))
+    if (st.fails > 0) { exit(1) }
+    exit(0)
+}

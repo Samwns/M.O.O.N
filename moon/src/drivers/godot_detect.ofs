@@ -1,0 +1,70 @@
+// M.O.O.N — deteccao da versao do Godot de um .pck (so o cabecalho, sem UI).
+//
+// Cabecalho de um .pck (core/io/file_access_pack.cpp, PackedSourcePCK::try_open_pack):
+//   u32 magic "GDPC" (bytes 47 44 50 43; 0x43504447 lido como u32 LE)
+//   u32 versao do formato do pack (1 = Godot 3.x, 2 = 4.0-4.3, 3 = 4.4, 4 = 4.5+; visto 4 no 4.7.2)
+//   u32 major, u32 minor, u32 patch   <- versao do motor que exportou o jogo
+// Tudo little-endian. O .pck embutido num executavel termina com o mesmo
+// magic e, antes dele, um u64 com o tamanho do pack; nesse caso o pack comeca em
+// (tamanho_do_arquivo - 12 - tamanho_do_pack).
+//
+// Uso: gd.version("/sdcard/Download/Jogo/jogo.pck") -> "4.7.2", ou "" se nao for GDPC.
+//      gd.plugin_id("4.7.2") -> "godot-4.7" (um plugin por major.minor).
+
+attach {F:../core/bytes.ofs}
+
+namespace gd {
+    forge MAGIC: stone = 1129333831
+
+    vein _size(path: obsidian) -> stone {
+        forge f = fopen(path, "rb")
+        if (f == null) { return 0 }
+        fseek(f, 0, 2)
+        forge n = ftell(f)
+        fclose(f)
+        return n
+    }
+
+    // Le "major.minor.patch" do pack que comeca em off dentro do arquivo.
+    vein _header(path: obsidian, off: stone) -> obsidian {
+        forge b = bx.read_at(path, off, 20)
+        if (b == 0) { return "" }
+        if (bx.last_len < 20) {
+            bx.free(b)
+            return ""
+        }
+        forge ok = bx.u32(b, 0) == MAGIC
+        forge fmt = bx.u32(b, 4)
+        forge ma = bx.u32(b, 8)
+        forge mi = bx.u32(b, 12)
+        forge pa = bx.u32(b, 16)
+        bx.free(b)
+        if (!ok) { return "" }
+        if (fmt < 1 || fmt > 8 || ma < 3 || ma > 9) { return "" }
+        return tx.num(ma) + "." + tx.num(mi) + "." + tx.num(pa)
+    }
+
+    // Versao do motor do .pck (ou executavel com pck embutido). "" se nao for Godot.
+    vein version(path: obsidian) -> obsidian {
+        forge v = _header(path, 0)
+        if (v != "") { return v }
+        // pck embutido: ultimos 12 bytes = u64 tamanho + "GDPC"
+        forge sz = _size(path)
+        if (sz < 32) { return "" }
+        forge t = bx.read_at(path, sz - 12, 12)
+        if (t == 0) { return "" }
+        forge tem = bx.last_len == 12 && bx.u32(t, 8) == MAGIC
+        forge psz = bx.u32(t, 0)
+        bx.free(t)
+        if (!tem) { return "" }
+        return _header(path, sz - 12 - psz)
+    }
+
+    // id do plugin que roda essa versao: Godot 4.x -> "godot-4.<minor>"; 3.x nao suportado.
+    vein plugin_id(v: obsidian) -> obsidian {
+        if (!tx.starts(v, "4.")) { return "" }
+        forge dot = tx.find(v, 46, 2)
+        if (dot < 0) { return "" }
+        return "godot-" + tx.sub(v, 0, dot)
+    }
+}

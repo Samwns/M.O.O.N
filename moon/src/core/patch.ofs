@@ -1,0 +1,257 @@
+// M.O.O.N — patches de traducao (porta de batch/vn_player_godot/src/core/PatchManager.gd).
+//
+// patch.json (sozinho ou dentro de uma pasta):
+// {
+//   "meta":    {"game": "moon", "lang": "pt-BR", "author": "...", "version": "1.0", "base": "en"},
+//   "strings": {"DAY01A": {"5": {"title": "..."}, "480": {"speaker": "...", "text": "..."}, "1280": {"options": [...]}}},
+//   "images":  {"FG200.webp": "images/FG200_ptbr.webp"}     // relativo a pasta do patch
+// }
+// Logica do script nunca muda: so title/speaker/text/options e arquivos de imagem.
+//
+// Pastas: <root>/<game>/<patch_id>/patch.json; o patch ativo de cada jogo fica
+// em settings.json ("active_patch": {game: id}), como no App.gd do Godot.
+// .zip ainda nao e suportado (pendencia: inflate da stdlib png.ofs serve de base).
+
+attach {F:bytes.ofs}
+attach {F:json.ofs}
+
+namespace patch {
+    forge root: obsidian = "patches"
+    forge settings_path: obsidian = "settings.json"
+    forge error: obsidian = ""
+    forge _loaded_id: obsidian = ""
+    forge _loaded_game: obsidian = ""
+    forge _patch: stone = -1
+    forge _patch_dir: obsidian = ""
+
+    vein init(patch_root: obsidian, settings_file: obsidian) -> void {
+        root = patch_root
+        settings_path = settings_file
+        _loaded_id = ""
+        _loaded_game = ""
+        _patch = -1
+    }
+
+    vein _game_dir(game_id: obsidian) -> obsidian {
+        return root + "/" + game_id
+    }
+
+    vein _strings_count(p: stone) -> stone {
+        forge n = 0
+        forge s = json.first(json.get(p, "strings"))
+        while (s >= 0) {
+            n = n + json.count(s)
+            s = json.next(s)
+        }
+        return n
+    }
+
+    // Patches instalados: array JSON de {id, dir, meta, strings_count}.
+    vein list_patches(game_id: obsidian) -> stone {
+        forge out = json.arr()
+        forge gd = _game_dir(game_id)
+        forge subs = bx.list_dir(gd, 2)
+        forge i = 0
+        while (i < ofs_array_len(subs)) {
+            forge sub: obsidian = ofs_array_get(subs, i)
+            forge dir = gd + "/" + sub
+            forge p = json.load(dir + "/patch.json")
+            if (json.is_obj(p)) {
+                forge e = json.obj()
+                json.put_s(e, "id", sub)
+                json.put_s(e, "dir", dir)
+                forge meta = json.get(p, "meta")
+                if (meta < 0) { meta = json.obj() }
+                json.put(e, "meta", json.clone(meta))
+                json.put_i(e, "strings_count", _strings_count(p))
+                json.push(out, e)
+            }
+            i++
+        }
+        return out
+    }
+
+    // Instala de um .json ou de uma pasta com patch.json. Devolve o id ou "" (erro em patch.error).
+    vein install(game_id: obsidian, src: obsidian, stamp: stone) -> obsidian {
+        error = ""
+        forge id = "patch_" + tx.num(stamp)
+        forge dst = _game_dir(game_id) + "/" + id
+        bx.mkdir_p(dst)
+        forge ext = tx.lower(tx.extension(src))
+        if (tx.eq(ext, "json")) {
+            bx.copy_file(src, dst + "/patch.json")
+        } else if (tx.eq(ext, "zip")) {
+            bx.remove_tree(dst)
+            error = "zip ainda nao suportado"
+            return ""
+        } else if (bx.is_dir(src)) {
+            bx.copy_tree(src, dst)
+        } else {
+            bx.remove_tree(dst)
+            error = "formato não suportado"
+            return ""
+        }
+        forge p = json.load(dst + "/patch.json")
+        if (!json.is_obj(p) || !json.has(p, "strings")) {
+            bx.remove_tree(dst)
+            error = "patch.json ausente ou sem \"strings\""
+            return ""
+        }
+        forge g = json.gs(json.get(p, "meta"), "game", game_id)
+        if (!tx.eq(g, game_id)) {
+            bx.remove_tree(dst)
+            error = "patch é para o jogo \"" + g + "\""
+            return ""
+        }
+        return id
+    }
+
+    vein uninstall(game_id: obsidian, patch_id: obsidian) -> void {
+        if (tx.eq(active_id(game_id), patch_id)) { activate(game_id, "") }
+        bx.remove_tree(_game_dir(game_id) + "/" + patch_id)
+    }
+
+    vein _settings() -> stone {
+        forge s = json.load(settings_path)
+        if (!json.is_obj(s)) { s = json.obj() }
+        return s
+    }
+
+    vein active_id(game_id: obsidian) -> obsidian {
+        return json.gs(json.get(_settings(), "active_patch"), game_id, "")
+    }
+
+    vein activate(game_id: obsidian, patch_id: obsidian) -> void {
+        forge s = _settings()
+        forge ap = json.get(s, "active_patch")
+        if (!json.is_obj(ap)) {
+            ap = json.obj()
+            json.put(s, "active_patch", ap)
+        }
+        json.put_s(ap, game_id, patch_id)
+        bx.mkdir_p(tx.dir_name(settings_path))
+        json.save(settings_path, s, "  ")
+        _loaded_id = "-"
+        ensure_loaded(game_id)
+    }
+
+    vein ensure_loaded(game_id: obsidian) -> void {
+        forge id = active_id(game_id)
+        if (tx.eq(id, _loaded_id) && tx.eq(game_id, _loaded_game)) { return }
+        _loaded_id = id
+        _loaded_game = game_id
+        _patch = -1
+        _patch_dir = ""
+        if (tx.len(id) == 0) { return }
+        _patch_dir = _game_dir(game_id) + "/" + id
+        forge p = json.load(_patch_dir + "/patch.json")
+        if (json.is_obj(p)) { _patch = p }
+    }
+
+    // Usa um patch ja carregado (ex.: testes) sem passar por settings.
+    vein use(p: stone, dir: obsidian) -> void {
+        _patch = p
+        _patch_dir = dir
+    }
+
+    vein active_meta() -> stone {
+        forge m = json.get(_patch, "meta")
+        if (m < 0) { return json.obj() }
+        return m
+    }
+
+    // Lingua base dos scripts para a qual o patch foi escrito (os addr vem dela).
+    vein base_lang() -> obsidian {
+        return json.gs(active_meta(), "base", "en")
+    }
+
+    // Instrucao com os campos de exibicao trocados (ou a original sem patch).
+    vein apply(script_name: obsidian, ins: stone) -> stone {
+        if (_patch < 0) { return ins }
+        forge per = json.get(json.get(_patch, "strings"), tx.upper(tx.basename(script_name)))
+        if (per < 0) { return ins }
+        forge o = json.get(per, tx.num(json.gi(ins, "addr", -1)))
+        if (!json.is_obj(o)) { return ins }
+        forge out = json.clone(ins)
+        forge fields = ["title", "speaker", "text", "options"]
+        forge i = 0
+        while (i < 4) {
+            forge k: obsidian = fields[i]
+            forge v = json.get(o, k)
+            if (v >= 0) { json.put(out, k, json.clone(v)) }
+            i++
+        }
+        return out
+    }
+
+    // Caminho absoluto de uma imagem substituta, ou "" (chaves como "FG200.webp").
+    vein image_override(file_name: obsidian) -> obsidian {
+        if (_patch < 0) { return "" }
+        forge want = tx.upper(file_name)
+        forge c = json.first(json.get(_patch, "images"))
+        while (c >= 0) {
+            if (tx.eq(tx.upper(json.key(c)), want)) {
+                forge p = _patch_dir + "/" + json.sval(c)
+                if (bx.exists(p)) { return p }
+                return ""
+            }
+            c = json.next(c)
+        }
+        return ""
+    }
+
+    // Grava um patch inicial com todas as strings de exibicao (para tradutores).
+    // scripts_dir: pasta dos scripts JSON da lingua base. Devolve o numero de entradas.
+    vein export_template(game_id: obsidian, scripts_dir: obsidian, out_path: obsidian, lang: obsidian) -> stone {
+        forge strings = json.obj()
+        forge n = 0
+        forge files = bx.list_dir(scripts_dir, 1)
+        forge fields = ["title", "speaker", "text", "options"]
+        forge i = 0
+        while (i < ofs_array_len(files)) {
+            forge f: obsidian = ofs_array_get(files, i)
+            i++
+            if (!tx.eq(tx.extension(f), "json")) { continue }
+            forge m = json.mark()
+            forge j = json.load(scripts_dir + "/" + f)
+            if (!json.is_obj(j)) {
+                json.release(m)
+                continue
+            }
+            forge per = json.obj()
+            forge ins = json.first(json.get(j, "instructions"))
+            while (ins >= 0) {
+                forge e = json.obj()
+                forge k = 0
+                while (k < 4) {
+                    forge key: obsidian = fields[k]
+                    forge v = json.get(ins, key)
+                    if (v >= 0 && !(tx.eq(key, "speaker") && tx.len(json.sval(v)) == 0)) {
+                        json.put(e, key, json.clone(v))
+                    }
+                    k++
+                }
+                if (json.count(e) > 0) {
+                    json.put(per, tx.num(json.gi(ins, "addr", -1)), e)
+                    n++
+                }
+                ins = json.next(ins)
+            }
+            if (json.count(per) > 0) { json.put(strings, tx.basename(f), per) }
+            // nao libera m: 'per' vive dentro de 'strings'
+        }
+        forge out = json.obj()
+        forge meta = json.obj()
+        json.put_s(meta, "game", game_id)
+        json.put_s(meta, "lang", "xx")
+        json.put_s(meta, "author", "")
+        json.put_s(meta, "version", "0.1")
+        json.put_s(meta, "base", lang)
+        json.put(out, "meta", meta)
+        json.put(out, "strings", strings)
+        json.put(out, "images", json.obj())
+        bx.mkdir_p(tx.dir_name(out_path))
+        json.save(out_path, out, "  ")
+        return n
+    }
+}

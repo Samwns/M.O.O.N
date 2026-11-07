@@ -1,0 +1,301 @@
+// M.O.O.N — hospedagem de motores nativos (Ren'Py, Godot) dentro do app, sem instalar APK.
+//
+// Fluxo (Moon/MOON.md, "Motores dentro do app — notas"):
+//   1. A UI chama host.iniciar(motor, versao, pasta_jogo). O host reabre a propria
+//      NativeActivity num processo novo, com os extras moon.motor/moon.versao/moon.jogo.
+//   2. No processo novo, app.iniciar() chama host.no_inicio() antes de tudo: com
+//      moon.motor presente, a janela e liberada (android.release_window), o adaptador
+//      .dex do pacote e carregado (DexClassLoader) e moon.host.Entrada.iniciar(Activity,
+//      Bundle) assume a tela. A UI OAL nao e montada nesse processo.
+//   3. Ao sair do jogo, o adaptador reabre o M.O.O.N sem extras (modo biblioteca).
+//
+//   motor:      "renpy" | "godot" (| "teste" com DEPURAR: so uma TextView)
+//   versao:     versao EXATA do motor do jogo ("8.4.1", "4.7.2")
+//   pasta_jogo: pasta do jogo lida onde esta (ex.: /sdcard/Download/WGW-0.1.5-pc)
+// Pacote instalado: files/plugins/<motor>-<versao>/<versao do pacote>/ (plugin.json, adaptador.dex, .so).
+// Copia executavel: <dados internos>/plugins/<motor>-<versao>/ (somente leitura).
+// Saves: /sdcard/MOON/saves/<motor>/<jogo>/.
+
+attach {F:android.ofs}
+
+extern vein ofs_str_eq(a: obsidian, b: obsidian) -> bool
+extern vein ofs_str_substr(s: obsidian, start: stone, len: stone) -> obsidian
+extern vein ofs_str_char_at(s: obsidian, idx: stone) -> stone
+
+namespace host {
+    forge last_error: obsidian = ""
+    // So para desenvolvimento (desligado na versao final): motor "teste" (P0, mostra
+    // uma TextView) e o extra moon.teste (Ren'Py sobe o Python e sai).
+    forge DEPURAR: bool = false
+    forge modo: obsidian = ""          // motor deste processo ("" = biblioteca)
+    forge classe: stone = 0            // ref global de moon.host.Entrada
+
+    // cores do tema (a UI pode preencher antes de iniciar; 0xRRGGBB)
+    forge cor_fundo: stone = 0
+    forge cor_texto: stone = 16777215
+
+    // modo de controle do jogo (a UI chama set_controle antes de iniciar)
+    //   modo:   "novel" | "gamepad"   ("" = o salvo em moon_controle.json, ou novel)
+    //   estilo: "teclado" | "xbox" | "ps" | "nintendo"
+    forge ctl_modo: obsidian = ""
+    forge ctl_estilo: obsidian = ""
+
+    vein _len(s: obsidian) -> stone { return ofs_str_len(s) }
+
+    // nome da pasta (ultimo componente) — id do jogo para os saves
+    vein base_name(p: obsidian) -> obsidian {
+        forge n = _len(p)
+        while (n > 1 && ofs_str_char_at(p, n - 1) == 47) { n = n - 1 }
+        forge i = n - 1
+        while (i >= 0 && ofs_str_char_at(p, i) != 47) { i = i - 1 }
+        return ofs_str_substr(p, i + 1, n - i - 1)
+    }
+
+    // so [A-Za-z0-9._-]; o resto vira '_'
+    vein safe_id(s: obsidian) -> obsidian {
+        forge out = ""
+        forge i = 0
+        forge n = _len(s)
+        while (i < n) {
+            forge c = ofs_str_char_at(s, i)
+            forge ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 46 || c == 45 || c == 95
+            if (ok) { out = out + ofs_str_substr(s, i, 1) } else { out = out + "_" }
+            i++
+        }
+        if (_len(out) == 0) { out = "jogo" }
+        return out
+    }
+
+    vein set_controle(modo_ctl: obsidian, estilo: obsidian) -> void {
+        ctl_modo = modo_ctl
+        ctl_estilo = estilo
+    }
+
+    // modo salvo pelo adaptador (menu ⋮ > Trocar modo) em <saves>/moon_controle.json; "" se nao houver
+    vein controle_salvo(motor: obsidian, pasta_jogo: obsidian) -> obsidian {
+        forge f = sv.game_dir(sv.motor_key(motor), _gid(pasta_jogo)) + "/moon_controle.json"
+        if (!bx.exists(f)) { return "" }
+        forge m = json.mark()
+        forge o = json.parse(bx.read_text(f))
+        forge r = tx.copy(json.gs(o, "modo", ""))
+        json.release(m)
+        return r
+    }
+
+    vein _gid(pasta_jogo: obsidian) -> obsidian {
+        forge gid = ""
+        forge i = 0
+        while (i < ofs_array_len(lib.g_src)) {
+            if (ofs_str_eq(ofs_array_get(lib.g_src, i), pasta_jogo)) { gid = ofs_array_get(lib.g_id, i) }
+            i++
+        }
+        if (_len(gid) == 0) { gid = safe_id(base_name(pasta_jogo)) }
+        return gid
+    }
+
+    // ── 1. chamada pela UI ───────────────────────────────────────────────
+    // Reinicia o M.O.O.N em modo motor. So volta se falhar (false + last_error).
+    vein iniciar(motor: obsidian, versao: obsidian, pasta_jogo: obsidian) -> bool {
+        last_error = ""
+        if (_len(motor) == 0 || _len(pasta_jogo) == 0) {
+            last_error = "motor ou pasta do jogo vazios"
+            return false
+        }
+        // id e pasta de saves do jogo (os mesmos da aba Saves)
+        forge gid = _gid(pasta_jogo)
+        forge mk = sv.motor_key(motor)
+        forge ks: Array<obsidian> = []
+        forge vs: Array<obsidian> = []
+        ofs_array_push(ks, "moon.motor")
+        ofs_array_push(vs, motor)
+        ofs_array_push(ks, "moon.versao")
+        ofs_array_push(vs, versao)
+        ofs_array_push(ks, "moon.jogo")
+        ofs_array_push(vs, pasta_jogo)
+        ofs_array_push(ks, "moon.jogo_id")
+        ofs_array_push(vs, gid)
+        ofs_array_push(ks, "moon.saves")
+        ofs_array_push(vs, sv.game_dir(mk, gid))
+        ofs_array_push(ks, "moon.txt_sair_msg")
+        ofs_array_push(vs, tr("host_sair_msg"))
+        ofs_array_push(ks, "moon.txt_sair")
+        ofs_array_push(vs, tr("host_sair"))
+        ofs_array_push(ks, "moon.txt_continuar")
+        ofs_array_push(vs, tr("host_continuar"))
+        forge cm = ctl_modo
+        if (_len(cm) == 0) { cm = controle_salvo(motor, pasta_jogo) }
+        if (!ofs_str_eq(cm, "gamepad")) { cm = "novel" }
+        ofs_array_push(ks, "moon.controle")
+        ofs_array_push(vs, cm)
+        ofs_array_push(ks, "moon.pad_estilo")
+        ofs_array_push(vs, ctl_estilo)
+        ofs_array_push(ks, "moon.lang")
+        ofs_array_push(vs, cfg.lang)
+        ofs_array_push(ks, "moon.cores")
+        ofs_array_push(vs, tx.num(oal.c_bg) + "," + tx.num(oal.c_fg))
+        android.restart_process(ks, vs)
+        last_error = "nao foi possivel reiniciar o app em modo motor"
+        return false
+    }
+
+    // ── 2. inicio do processo ────────────────────────────────────────────
+    // true: este processo e de um motor (a UI nao deve montar nada).
+    vein no_inicio() -> bool {
+        modo = android.intent_extra("moon.motor")
+        if (_len(modo) == 0) { return false }
+        // reaberto pela lista de recentes depois de o processo morrer: biblioteca
+        forge it = android.jni_call(android.jni_activity(), "getIntent", "()Landroid/content/Intent;", 0, 0, 0, 0, 0, 0)
+        forge fl = android.jni_call(it, "getFlags", "()I", 0, 0, 0, 0, 0, 0)
+        android.jni_delete(it)
+        if ((fl & 1048576) != 0) {
+            android.log_tag("moon", "host: aberto pelos recentes, voltando a biblioteca")
+            forge k0: Array<obsidian> = []
+            android.restart_process(k0, k0)
+        }
+        forge cores = android.intent_extra("moon.cores")
+        forge vir = tx.find(cores, 44, 0)
+        if (vir > 0) {
+            cor_fundo = tx.to_int(tx.sub(cores, 0, vir))
+            cor_texto = tx.to_int(tx.sub(cores, vir + 1, _len(cores) - vir - 1))
+        }
+        android.log_tag("moon", "host: modo motor " + modo)
+        if (!android.release_window()) {
+            android.log_tag("moon", "host: release_window falhou")
+        }
+        if (DEPURAR && ofs_str_eq(modo, "teste")) {
+            mensagem("M.O.O.N modo motor: View Android via JNI (P0)")
+            return true
+        }
+        if (!carregar()) {
+            android.log_tag("moon", "host: erro " + last_error)
+            mensagem("M.O.O.N\n\n" + last_error)
+        }
+        return true
+    }
+
+    // pacote instalado (files/plugins/<id>/<versao do pacote>/) — "" se nao houver
+    vein pasta_pacote(id: obsidian) -> obsidian {
+        forge raiz = android.external_data_path() + "/plugins/" + id
+        forge vers = bx.list_dir(raiz, 2)
+        forge n = ofs_array_len(vers)
+        if (n == 0) { return "" }
+        return raiz + "/" + ofs_array_get(vers, n - 1)
+    }
+
+    // copia o pacote para a area interna (o Android nao executa .so/.dex do
+    // armazenamento externo) e marca somente leitura (Android 14+).
+    // So copia de novo se o plugin.json mudou.
+    vein copia_interna(pac: obsidian, id: obsidian) -> obsidian {
+        forge dst = android.internal_data_path() + "/plugins/" + id
+        forge pj = bx.read_text(pac + "/plugin.json")
+        if (bx.exists(dst + "/plugin.json") && ofs_str_eq(bx.read_text(dst + "/plugin.json"), pj)) { return dst }
+        android.log_tag("moon", "host: copiando " + pac + " -> " + dst)
+        bx.remove_tree(dst)
+        bx.mkdir_p(dst)
+        forge arqs = bx.list_dir(pac, 1)
+        forge i = 0
+        while (i < ofs_array_len(arqs)) {
+            forge nm: obsidian = ofs_array_get(arqs, i)
+            if (!ofs_str_eq(nm, "plugin.json")) {
+                if (!bx.copy_file(pac + "/" + nm, dst + "/" + nm)) {
+                    last_error = "falha ao copiar " + nm
+                    return ""
+                }
+                android.set_read_only(dst + "/" + nm)
+            }
+            i++
+        }
+        bx.write_text(dst + "/plugin.json", pj)    // por ultimo: marca a copia como completa
+        return dst
+    }
+
+    vein _put(b: stone, k: obsidian, v: obsidian) -> void {
+        forge jk = android.jni_string(k)
+        forge jv = android.jni_string(v)
+        android.jni_call(b, "putString", "(Ljava/lang/String;Ljava/lang/String;)V", jk, jv, 0, 0, 0, 0)
+        android.jni_delete(jv)
+        android.jni_delete(jk)
+    }
+
+    vein carregar() -> bool {
+        forge versao = android.intent_extra("moon.versao")
+        forge jogo = android.intent_extra("moon.jogo")
+        forge id = modo + "-" + versao
+        forge pac = pasta_pacote(id)
+        if (_len(pac) == 0) {
+            last_error = "pacote " + id + " nao instalado"
+            return false
+        }
+        forge m = json.mark()
+        forge o = json.parse(bx.read_text(pac + "/plugin.json"))
+        forge entrada = tx.copy(json.gs(o, "entrada", "adaptador.dex"))
+        forge cls = tx.copy(json.gs(o, "classe", "moon.host.Entrada"))
+        // "classpath": dex extras do motor no mesmo DexClassLoader (ex.: godot-lib do template)
+        forge extras: Array<obsidian> = []
+        forge cp = json.get(o, "classpath")
+        if (cp >= 0) {
+            forge c = json.first(cp)
+            while (c >= 0) {
+                ofs_array_push(extras, tx.copy(json.sval(c)))
+                c = json.next(c)
+            }
+        }
+        json.release(m)
+        forge dir = copia_interna(pac, id)
+        if (_len(dir) == 0) { return false }
+        forge caminho = dir + "/" + entrada
+        forge k = 0
+        while (k < ofs_array_len(extras)) {
+            caminho = caminho + ":" + dir + "/" + ofs_array_get(extras, k)
+            k++
+        }
+        classe = android.dex_load_class(caminho, dir, cls)
+        if (classe == 0) {
+            last_error = "adaptador: " + android.jni_error
+            return false
+        }
+        forge b = android.jni_new("android/os/Bundle", "()V", 0, 0, 0, 0)
+        _put(b, "motor", modo)
+        _put(b, "versao", versao)
+        _put(b, "jogo", jogo)
+        _put(b, "jogo_id", android.intent_extra("moon.jogo_id"))
+        _put(b, "saves", android.intent_extra("moon.saves"))
+        _put(b, "script", android.intent_extra("moon.script"))
+        // argumentos extras de um reinicio/OS.create_instance do jogo (o adaptador os poe na linha de comando)
+        _put(b, "args", android.intent_extra("moon.args"))
+        if (DEPURAR) { _put(b, "teste", android.intent_extra("moon.teste")) }
+        _put(b, "txt_sair_msg", android.intent_extra("moon.txt_sair_msg"))
+        _put(b, "txt_sair", android.intent_extra("moon.txt_sair"))
+        _put(b, "txt_continuar", android.intent_extra("moon.txt_continuar"))
+        _put(b, "controle", android.intent_extra("moon.controle"))
+        _put(b, "pad_estilo", android.intent_extra("moon.pad_estilo"))
+        _put(b, "lang", android.intent_extra("moon.lang"))
+        _put(b, "plugin_dir", dir)
+        _put(b, "pacote_dir", pac)
+        _put(b, "cor_fundo", tx.num(cor_fundo))
+        _put(b, "cor_texto", tx.num(cor_texto))
+        android.log_tag("moon", "host: " + id + " " + cls + ".iniciar " + jogo)
+        android.jni_scall_cls(classe, "iniciar", "(Landroid/app/Activity;Landroid/os/Bundle;)V", android.jni_activity(), b, 0, 0)
+        android.jni_delete(b)
+        if (android.jni_failed) {
+            last_error = "adaptador falhou: " + android.jni_error
+            return false
+        }
+        return true
+    }
+
+    // TextView em tela cheia com as cores do tema (carregando/erro).
+    vein mensagem(texto: obsidian) -> void {
+        forge act = android.jni_activity()
+        forge tv = android.jni_new("android/widget/TextView", "(Landroid/content/Context;)V", act, 0, 0, 0)
+        if (tv == 0) { return }
+        forge js = android.jni_string(texto)
+        android.jni_call(tv, "setText", "(Ljava/lang/CharSequence;)V", js, 0, 0, 0, 0, 0)
+        android.jni_call(tv, "setTextColor", "(I)V", 4278190080 | cor_texto, 0, 0, 0, 0, 0)
+        android.jni_call(tv, "setBackgroundColor", "(I)V", 4278190080 | cor_fundo, 0, 0, 0, 0, 0)
+        android.jni_call(tv, "setGravity", "(I)V", 17, 0, 0, 0, 0, 0)
+        android.set_content_view(tv)
+        android.jni_delete(js)
+        android.jni_delete(tv)
+    }
+}

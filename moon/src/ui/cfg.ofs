@@ -1,0 +1,575 @@
+// M.O.O.N - configuracoes do app (files/config.json), tema e traducoes.
+//
+// Os textos da interface passam por tr("chave"): pt (padrao), en, es.
+
+attach {hashmap}
+attach {F:../core/bytes.ofs}
+attach {F:../core/json.ofs}
+
+namespace cfg {
+    forge path: obsidian = ""
+    forge lang: obsidian = "pt"
+    forge theme: stone = 0           // ver "temas" abaixo (0 preto e branco)
+    forge text_size: stone = 100     // %
+    forge text_speed: stone = 45     // caracteres/s (0 = instantaneo)
+    forge auto_delay: stone = 12     // decimos de segundo apos a fala (auto)
+    forge ctrl_opacity: stone = 70   // %
+    forge ctrl_size: stone = 100     // %
+    forge dpad_side: stone = 0       // 0 esquerda, 1 direita
+    forge pad_show: stone = 1        // gamepad na tela (D-pad + 4 botoes)
+    forge pad_style: stone = 1       // 0 teclado, 1 Xbox, 2 PlayStation, 3 Nintendo
+    forge pad_swap: stone = 0        // bit = estilo: confirmar/cancelar trocados (PS: bit 2 = japones)
+    forge pad_auto: stone = 1        // esconde o gamepad com controle fisico
+    forge orientation: stone = 0     // 0 auto, 1 retrato, 2 paisagem
+    forge vol_bgm: stone = 80
+    forge vol_voice: stone = 100
+    forge vol_master: stone = 100
+    forge game_lang: obsidian = "en" // textos do MOON.: en (com patch) ou ja
+    forge settings_tab: stone = 0
+    forge player_orient: stone = 2   // player: 2 paisagem (padrao), 1 retrato
+    forge plugin_index: obsidian = "" // URL do index.json dos plugins (https://, file:// ou caminho)
+
+    vein load(p: obsidian) -> void {
+        path = p
+        forge o = json.load(p)
+        if (!json.is_obj(o)) { return }
+        lang = json.gs(o, "lang", lang)
+        theme = json.gi(o, "theme", theme)
+        text_size = json.gi(o, "text_size", text_size)
+        text_speed = json.gi(o, "text_speed", text_speed)
+        auto_delay = json.gi(o, "auto_delay", auto_delay)
+        ctrl_opacity = json.gi(o, "ctrl_opacity", ctrl_opacity)
+        ctrl_size = json.gi(o, "ctrl_size", ctrl_size)
+        dpad_side = json.gi(o, "dpad_side", dpad_side)
+        pad_show = json.gi(o, "pad_show", pad_show)
+        pad_style = json.gi(o, "pad_style", pad_style)
+        pad_swap = json.gi(o, "pad_swap", pad_swap)
+        pad_auto = json.gi(o, "pad_auto", pad_auto)
+        orientation = json.gi(o, "orientation", orientation)
+        vol_bgm = json.gi(o, "vol_bgm", vol_bgm)
+        vol_voice = json.gi(o, "vol_voice", vol_voice)
+        vol_master = json.gi(o, "vol_master", vol_master)
+        game_lang = json.gs(o, "game_lang", game_lang)
+        player_orient = json.gi(o, "player_orient", player_orient)
+        plugin_index = tx.copy(json.gs(o, "plugin_index", plugin_index))
+        custom = []
+        forge cc = json.first(json.get(o, "custom_colors"))
+        while (cc >= 0) {
+            ofs_array_push(custom, json.ival(cc))
+            cc = json.next(cc)
+        }
+        if (ofs_array_len(custom) < COLOR_COUNT) {
+            custom = []
+            if (theme == 6) { theme = 0 }
+        }
+    }
+
+    vein save() -> void {
+        if (tx.len(path) == 0) { return }
+        forge m = json.mark()
+        forge o = json.obj()
+        json.put_s(o, "lang", lang)
+        json.put_i(o, "theme", theme)
+        json.put_i(o, "text_size", text_size)
+        json.put_i(o, "text_speed", text_speed)
+        json.put_i(o, "auto_delay", auto_delay)
+        json.put_i(o, "ctrl_opacity", ctrl_opacity)
+        json.put_i(o, "ctrl_size", ctrl_size)
+        json.put_i(o, "dpad_side", dpad_side)
+        json.put_i(o, "pad_show", pad_show)
+        json.put_i(o, "pad_style", pad_style)
+        json.put_i(o, "pad_swap", pad_swap)
+        json.put_i(o, "pad_auto", pad_auto)
+        json.put_i(o, "orientation", orientation)
+        json.put_i(o, "vol_bgm", vol_bgm)
+        json.put_i(o, "vol_voice", vol_voice)
+        json.put_i(o, "vol_master", vol_master)
+        json.put_s(o, "game_lang", game_lang)
+        json.put_i(o, "player_orient", player_orient)
+        json.put_s(o, "plugin_index", plugin_index)
+        if (ofs_array_len(custom) >= COLOR_COUNT) {
+            forge ca = json.arr()
+            forge ck = 0
+            while (ck < COLOR_COUNT) {
+                json.push(ca, json.int(ofs_array_get(custom, ck)))
+                ck++
+            }
+            json.put(o, "custom_colors", ca)
+        }
+        json.save(path, o, "  ")
+        json.release(m)
+    }
+
+    // ── tema ─────────────────────────────────────────────────────────────
+    // ── temas ────────────────────────────────────────────────────────────
+    // 11 cores por tema (0xRRGGBB): 0 fundo, 1 superficie, 2 texto, 3 texto secundario,
+    // 4 destaque, 5 botao, 6 botao pressionado, 7 barra, 8 borda, 9 selo do motor, 10 caixa de texto do player.
+    // Temas: 0 preto e branco (padrao), 1 roxo, 2 claro, 3 lua azul, 4 sepia, 5 floresta, 6 personalizado.
+    forge THEME_COUNT: stone = 7
+    forge COLOR_COUNT: stone = 11
+    forge custom: Array<stone> = []
+
+    vein _mix(a: stone, b: stone, pct: stone) -> stone {
+        forge r = (((a >> 16) & 255) * (100 - pct) + ((b >> 16) & 255) * pct) / 100
+        forge g = (((a >> 8) & 255) * (100 - pct) + ((b >> 8) & 255) * pct) / 100
+        forge bl = ((a & 255) * (100 - pct) + (b & 255) * pct) / 100
+        return (r << 16) | (g << 8) | bl
+    }
+
+    // tema simples: fundo, barra, superficie, texto, secundario, destaque
+    vein _mk(bg: stone, bar: stone, surf: stone, fg: stone, muted: stone, acc: stone) -> Array<stone> {
+        forge o: Array<stone> = []
+        ofs_array_push(o, bg)
+        ofs_array_push(o, surf)
+        ofs_array_push(o, fg)
+        ofs_array_push(o, muted)
+        ofs_array_push(o, acc)
+        ofs_array_push(o, acc)
+        ofs_array_push(o, _mix(acc, surf, 35))
+        ofs_array_push(o, bar)
+        ofs_array_push(o, _mix(surf, bg, 50))
+        ofs_array_push(o, bar)
+        ofs_array_push(o, bg)
+        return o
+    }
+
+    vein theme_colors(i: stone) -> Array<stone> {
+        if (i == 1) { return _mk(1052704, 1513768, 2105394, 15132390, 9474224, 9136639) }
+        if (i == 2) { return _mk(15921906, 16777215, 16777215, 2105376, 7368816, 6044864) }
+        if (i == 3) { return _mk(726570, 1121337, 1516104, 14674175, 8423592, 7130623) }
+        if (i == 4) { return _mk(2499360, 3157030, 3815216, 15784136, 11050128, 14191192) }
+        if (i == 5) { return _mk(727310, 1055251, 1450522, 15003622, 9413015, 6279053) }
+        if (i == 6 && ofs_array_len(custom) >= COLOR_COUNT) { return custom }
+        // 0: preto e branco
+        forge o: Array<stone> = [0, 1315860, 16777215, 10526880, 16777215, 15132390, 11051176, 658186, 2763306, 1973790, 0]
+        return o
+    }
+
+    vein color(k: stone) -> stone {
+        forge c = theme_colors(theme)
+        return ofs_array_get(c, k)
+    }
+
+    // caixa de texto do player (cor do tema)
+    vein textbox() -> stone { return color(10) }
+
+    vein apply_theme() -> void {
+        forge c = theme_colors(theme)
+        forge surf: stone = ofs_array_get(c, 1)
+        forge fg: stone = ofs_array_get(c, 2)
+        forge hi = _mix(surf, fg, 12)
+        oal.set_palette_full(ofs_array_get(c, 0), ofs_array_get(c, 7), surf, hi, fg, ofs_array_get(c, 3), ofs_array_get(c, 4), ofs_array_get(c, 5), ofs_array_get(c, 6), ofs_array_get(c, 8), ofs_array_get(c, 9))
+    }
+
+    // comeca o tema personalizado a partir do tema atual
+    vein start_custom() -> void {
+        if (theme != 6) {
+            forge c = theme_colors(theme)
+            custom = []
+            forge k = 0
+            while (k < COLOR_COUNT) {
+                ofs_array_push(custom, ofs_array_get(c, k))
+                k++
+            }
+        }
+        theme = 6
+    }
+
+    vein set_color(k: stone, rgb: stone) -> void {
+        start_custom()
+        ofs_array_set(custom, k, rgb & 16777215)
+    }
+
+    vein reset_theme() -> void {
+        theme = 0
+        custom = []
+    }
+
+    vein theme_name(i: stone) -> obsidian {
+        if (i == 1) { return tr("tema_roxo") }
+        if (i == 2) { return tr("tema_claro") }
+        if (i == 3) { return tr("tema_azul") }
+        if (i == 4) { return tr("tema_sepia") }
+        if (i == 5) { return tr("tema_floresta") }
+        if (i == 6) { return tr("tema_custom") }
+        return tr("tema_noite")
+    }
+
+    vein color_name(k: stone) -> obsidian {
+        return tr("cor_" + tx.num(k))
+    }
+
+    vein hex(rgb: stone) -> obsidian {
+        forge d = "0123456789ABCDEF"
+        forge out = "#"
+        forge k = 5
+        while (k >= 0) {
+            out = out + tx.sub(d, (rgb >> (k * 4)) & 15, 1)
+            k--
+        }
+        return out
+    }
+
+    forge _keys: Array<obsidian> = []
+    forge _pt: Array<obsidian> = []
+    forge _en: Array<obsidian> = []
+    forge _es: Array<obsidian> = []
+    forge _idx: stone = -1
+
+    vein _h(s: obsidian) -> stone {
+        forge h = -3750763034362895579
+        forge i = 0
+        while (i < tx.len(s)) {
+            h = (h ^ tx.at(s, i)) * 1099511628211
+            i++
+        }
+        return h
+    }
+
+    vein _t(k: obsidian, pt: obsidian, en: obsidian, es: obsidian) -> void {
+        ofs_array_push(_keys, k)
+        ofs_array_push(_pt, pt)
+        ofs_array_push(_en, en)
+        ofs_array_push(_es, es)
+        hashmap.set(_idx, _h(k), ofs_array_len(_keys) - 1)
+    }
+
+    vein tr_lang(k: obsidian, l: obsidian) -> obsidian {
+        if (_idx < 0) { _init() }
+        forge i = hashmap.get(_idx, _h(k), -1)
+        if (i < 0) { return k }
+        if (tx.eq(l, "en")) { return ofs_array_get(_en, i) }
+        if (tx.eq(l, "es")) { return ofs_array_get(_es, i) }
+        return ofs_array_get(_pt, i)
+    }
+
+    vein _init() -> void {
+        _idx = hashmap.new(512)
+        _t("biblioteca", "Biblioteca", "Library", "Biblioteca")
+        _t("n_jogos", "jogos na biblioteca", "games in the library", "juegos en la biblioteca")
+        _t("um_jogo", "1 jogo na biblioteca", "1 game in the library", "1 juego en la biblioteca")
+        _t("vazio_bib", "Toque em + para adicionar um jogo", "Tap + to add a game", "Toca + para añadir un juego")
+        _t("buscar", "Buscar na biblioteca", "Search the library", "Buscar en la biblioteca")
+        _t("nada_busca", "Nenhum jogo com esse nome.", "No game with that name.", "Ningún juego con ese nombre.")
+        _t("importar", "Importar", "Import", "Importar")
+        _t("importar_jogo", "Importar jogo", "Import game", "Importar juego")
+        _t("arquivos", "Arquivos", "Files", "Archivos")
+        _t("plugins", "Plugins", "Plugins", "Plugins")
+        _t("config", "Configurações", "Settings", "Ajustes")
+        _t("personalizar", "Personalização e ajustes", "Personalization", "Personalización")
+        _t("perm_titulo", "Acesso aos arquivos", "File access", "Acceso a los archivos")
+        _t("perm_texto", "Para encontrar e importar os jogos que você copiou para o celular (por exemplo em Download), o M.O.O.N precisa da permissão \"Acesso a todos os arquivos\". Ele só lê as pastas dos jogos; nada é apagado nem enviado para fora do aparelho.", "To find and import the games you copied to the phone (for example in Download), M.O.O.N needs the \"All files access\" permission. It only reads the game folders; nothing is deleted or sent off the device.", "Para encontrar e importar los juegos que copiaste al teléfono (por ejemplo en Download), M.O.O.N necesita el permiso \"Acceso a todos los archivos\". Solo lee las carpetas de los juegos; no se borra ni se envía nada fuera del aparato.")
+        _t("perm_passos", "Toque no botão abaixo, ative \"Permitir acesso para gerenciar todos os arquivos\" e volte para o app.", "Tap the button below, turn on \"Allow access to manage all files\" and come back to the app.", "Toca el botón de abajo, activa \"Permitir acceso para administrar todos los archivos\" y vuelve a la app.")
+        _t("perm_botao", "Permitir acesso", "Allow access", "Permitir acceso")
+        _t("perm_ok", "Acesso a todos os arquivos: liberado", "All files access: granted", "Acceso a todos los archivos: concedido")
+        _t("perm_nao", "Acesso a todos os arquivos: não liberado", "All files access: not granted", "Acceso a todos los archivos: no concedido")
+        _t("perm_falhou", "Não foi possível abrir as configurações do sistema", "Could not open the system settings", "No se pudieron abrir los ajustes del sistema")
+        _t("imp_titulo", "Importar jogo", "Import game", "Importar juego")
+        _t("imp_texto", "Pastas encontradas em Download e em files/import. Toque em um jogo para adicioná-lo à biblioteca.", "Folders found in Download and files/import. Tap a game to add it to the library.", "Carpetas encontradas en Download y files/import. Toca un juego para añadirlo a la biblioteca.")
+        _t("imp_vazio", "Nenhuma pasta encontrada. Copie a pasta do jogo para Download ou para files/import.", "No folder found. Copy the game folder to Download or files/import.", "No se encontró ninguna carpeta. Copia la carpeta del juego a Download o files/import.")
+        _t("imp_outra", "Escolher outra pasta", "Choose another folder", "Elegir otra carpeta")
+        _t("imp_atualizar", "Procurar de novo", "Scan again", "Buscar de nuevo")
+        _t("imp_ja", "já está na biblioteca", "already in the library", "ya está en la biblioteca")
+        _t("imp_conv", "Convertendo MOON.", "Converting MOON.", "Convirtiendo MOON.")
+        _t("imp_cancelar", "Cancelar", "Cancel", "Cancelar")
+        _t("imp_scripts", "Scripts", "Scripts", "Scripts")
+        _t("imp_imagens", "Imagens", "Images", "Imágenes")
+        _t("imp_tamanho", "Calculando tamanho", "Measuring size", "Calculando tamaño")
+        _t("imp_feito", "Adicionado à biblioteca", "Added to the library", "Añadido a la biblioteca")
+        _t("imp_cancelado", "Importação cancelada", "Import cancelled", "Importación cancelada")
+        _t("imp_aviso", "A conversão roda no celular e não trava a tela. Pode levar alguns minutos.", "The conversion runs on the phone without freezing the screen. It may take a few minutes.", "La conversión se hace en el teléfono sin bloquear la pantalla. Puede tardar unos minutos.")
+        _t("motor", "Motor", "Engine", "Motor")
+        _t("versao", "Versão", "Version", "Versión")
+        _t("tamanho", "Tamanho", "Size", "Tamaño")
+        _t("pasta", "Pasta", "Folder", "Carpeta")
+        _t("empresa", "Empresa", "Company", "Empresa")
+        _t("executavel", "Executável", "Executable", "Ejecutable")
+        _t("adicionado", "Adicionado em", "Added on", "Añadido el")
+        _t("jogar", "Jogar", "Play", "Jugar")
+        _t("continuar", "Continuar", "Continue", "Continuar")
+        _t("carregar", "Carregar", "Load", "Cargar")
+        _t("salvar", "Salvar", "Save", "Guardar")
+        _t("instalar_plugin", "Instalar plugin", "Install plugin", "Instalar plugin")
+        _t("nao_suportado", "Não suportado", "Not supported", "No compatible")
+        _t("st_pronto", "Pronto para jogar", "Ready to play", "Listo para jugar")
+        _t("st_plugin", "Precisa de plugin", "Needs a plugin", "Necesita un plugin")
+        _t("st_nao", "Não suportado ainda", "Not supported yet", "Aún no compatible")
+        _t("st_falta", "Pasta do jogo não encontrada", "Game folder not found", "Carpeta del juego no encontrada")
+        _t("plugin_breve", "O plugin deste motor ainda não está disponível. Ele vai rodar o motor original do jogo.", "The plugin for this engine is not available yet. It will run the game's original engine.", "El plugin de este motor aún no está disponible. Ejecutará el motor original del juego.")
+        _t("patches", "Patches de tradução", "Translation patches", "Parches de traducción")
+        _t("patch_nenhum", "Nenhum patch instalado.", "No patch installed.", "Ningún parche instalado.")
+        _t("patch_incluso", "Instalar patch PT-BR incluso", "Install bundled PT-BR patch", "Instalar parche PT-BR incluido")
+        _t("patch_arquivo", "Importar patch", "Import patch", "Importar parche")
+        _t("patch_exportar", "Exportar modelo", "Export template", "Exportar modelo")
+        _t("patch_exportado", "Modelo salvo em", "Template saved to", "Modelo guardado en")
+        _t("patch_exportar_vazio", "Nenhuma string encontrada para exportar", "No strings found to export", "No se encontraron cadenas para exportar")
+        _t("patch_remover", "Remover patch selecionado", "Remove selected patch", "Quitar parche seleccionado")
+        _t("patch_remover_confirma", "Toque de novo para remover o patch (o jogo não é apagado)", "Tap again to remove the patch (the game is not deleted)", "Toca de nuevo para quitar el parche (el juego no se borra)")
+        _t("patch_removido", "Patch removido", "Patch removed", "Parche quitado")
+        _t("descricao", "Descrição", "Description", "Descripción")
+        _t("descricao_editar", "Editar descrição", "Edit description", "Editar descripción")
+        _t("descricao_vazia", "Sem descrição.", "No description.", "Sin descripción.")
+        _t("screenshots", "Screenshots", "Screenshots", "Capturas")
+        _t("patch_ativo", "ativo", "active", "activo")
+        _t("patch_instalado", "Patch instalado", "Patch installed", "Parche instalado")
+        _t("patch_invalido", "Arquivo de patch inválido", "Invalid patch file", "Archivo de parche no válido")
+        _t("renomear", "Renomear", "Rename", "Renombrar")
+        _t("trocar_capa", "Trocar capa", "Change cover", "Cambiar portada")
+        _t("remover", "Remover da biblioteca", "Remove from library", "Quitar de la biblioteca")
+        _t("remover_confirma", "Toque de novo para remover (os arquivos originais do jogo não são apagados)", "Tap again to remove (the original game files are not deleted)", "Toca de nuevo para quitar (los archivos originales del juego no se borran)")
+        _t("removido", "Removido da biblioteca", "Removed from the library", "Quitado de la biblioteca")
+        _t("add_jogo", "Adicionar jogo", "Add game", "Añadir juego")
+        _t("m_arquivos", "Gerenciador de arquivos", "File manager", "Gestor de archivos")
+        _t("m_atualizar_bib", "Atualizar biblioteca", "Refresh library", "Actualizar biblioteca")
+        _t("m_atualizar", "Atualizar", "Refresh", "Actualizar")
+        _t("m_detalhes", "Detalhes", "Details", "Detalles")
+        _t("m_abrir", "Abrir", "Open", "Abrir")
+        _t("m_subir", "Subir um nível", "Up one level", "Subir un nivel")
+        _t("m_descricao", "Editar descrição", "Edit description", "Editar descripción")
+        _t("bib_atualizada", "Biblioteca atualizada", "Library refreshed", "Biblioteca actualizada")
+        _t("apagar_bib", "Apagar da biblioteca", "Delete from library", "Borrar de la biblioteca")
+        _t("apagar_q", "Apagar da biblioteca?", "Delete from library?", "¿Borrar de la biblioteca?")
+        _t("apagar_so_bib", "Apagar só a entrada (mantém os arquivos)", "Delete entry only (keeps the files)", "Borrar solo la entrada (conserva los archivos)")
+        _t("apagar_arq", "Apagar também os dados do app...", "Also delete the app data...", "Borrar también los datos de la app...")
+        _t("apagar_arq_q", "Apagar jogo e dados do app?", "Delete game and app data?", "¿Borrar juego y datos de la app?")
+        _t("apagar_ultima", "Tem certeza? Não dá para desfazer", "Are you sure? This cannot be undone", "¿Seguro? No se puede deshacer")
+        _t("apagar_tudo", "Sim, apagar tudo", "Yes, delete everything", "Sí, borrar todo")
+        _t("pop_seguir", "Continuar", "Continue", "Continuar")
+        _t("pop_cancelar", "Cancelar", "Cancel", "Cancelar")
+        _t("pl_remover_q", "Remover plugin?", "Remove plugin?", "¿Quitar plugin?")
+        _t("nome", "Nome do jogo", "Game name", "Nombre del juego")
+        _t("salvo", "Salvo", "Saved", "Guardado")
+        _t("capa_titulo", "Escolha a capa", "Choose the cover", "Elige la portada")
+        _t("capa_icone", "Ícone do motor", "Engine icon", "Icono del motor")
+        _t("capa_vazio", "Nenhuma imagem PNG encontrada para este jogo.", "No PNG image found for this game.", "No se encontró ninguna imagen PNG para este juego.")
+        _t("pl_nativo", "Nativo (OFS), instalado", "Native (OFS), installed", "Nativo (OFS), instalado")
+        _t("pl_renpy", "Plugin Ren'Py (motor original), em breve", "Ren'Py plugin (original engine), coming soon", "Plugin Ren'Py (motor original), próximamente")
+        _t("pl_compat", "Plugin de compatibilidade, em breve", "Compatibility plugin, coming soon", "Plugin de compatibilidad, próximamente")
+        _t("pl_jogos", "Jogos na biblioteca com este motor", "Games in the library with this engine", "Juegos en la biblioteca con este motor")
+        _t("pl_deteccao", "Como é detectado", "How it is detected", "Cómo se detecta")
+        _t("pl_estado", "Estado", "Status", "Estado")
+        _t("aba_config", "Configurações", "Settings", "Ajustes")
+        _t("aba_pers", "Personalização", "Personalize", "Personalizar")
+        _t("idioma", "Idioma", "Language", "Idioma")
+        _t("armazenamento", "Armazenamento", "Storage", "Almacenamiento")
+        _t("abrir_pasta_app", "Abrir pasta do app", "Open app folder", "Abrir carpeta de la app")
+        _t("permissoes", "Permissões", "Permissions", "Permisos")
+        _t("sobre", "Sobre", "About", "Acerca de")
+        _t("sobre_texto", "M.O.O.N 0.2 - biblioteca e player de visual novels escrito 100% em OFS (Obsidian Fault Script) com interface em OAL. Roda o MOON. (Tactics, 1997) nativamente a partir dos arquivos originais do jogo.", "M.O.O.N 0.2 - visual novel library and player written 100% in OFS (Obsidian Fault Script) with an OAL interface. Runs MOON. (Tactics, 1997) natively from the original game files.", "M.O.O.N 0.2 - biblioteca y reproductor de novelas visuales escrito 100% en OFS (Obsidian Fault Script) con interfaz OAL. Ejecuta MOON. (Tactics, 1997) de forma nativa desde los archivos originales del juego.")
+        _t("tema", "Tema", "Theme", "Tema")
+        _t("tema_claro", "Claro", "Light", "Claro")
+        _t("tema_azul", "Lua azul", "Blue moon", "Luna azul")
+        _t("tema_sepia", "Sépia", "Sepia", "Sepia")
+        _t("tam_texto", "Tamanho do texto", "Text size", "Tamaño del texto")
+        _t("vel_texto", "Velocidade do texto (0 = instantâneo)", "Text speed (0 = instant)", "Velocidad del texto (0 = instantáneo)")
+        _t("auto_espera", "Espera do modo auto (décimos de s)", "Auto mode delay (tenths of s)", "Espera del modo auto (décimas de s)")
+        _t("opac_ctrl", "Opacidade dos controles", "Controls opacity", "Opacidad de los controles")
+        _t("tam_ctrl", "Tamanho do joystick e dos botões", "Joystick and button size", "Tamaño del joystick y botones")
+        _t("lado_dpad", "Posição do joystick", "Joystick position", "Posición del joystick")
+        _t("sim", "Sim", "Yes", "Sí")
+        _t("nao", "Não", "No", "No")
+        _t("gamepad", "Gamepad na tela", "On-screen gamepad", "Gamepad en pantalla")
+        _t("pad_mostrar", "Mostrar gamepad", "Show gamepad", "Mostrar gamepad")
+        _t("pad_ocultar", "Ocultar", "Hide", "Ocultar")
+        _t("pad_auto_ocultar", "Esconder com controle físico", "Hide with a physical controller", "Ocultar con mando físico")
+        _t("pad_estilo", "Estilo dos botões de ação", "Action button style", "Estilo de los botones de acción")
+        _t("pad_teclado", "Teclado", "Keyboard", "Teclado")
+        _t("pad_xbox", "Xbox", "Xbox", "Xbox")
+        _t("pad_play", "PS", "PS", "PS")
+        _t("pad_nintendo", "Nintendo", "Nintendo", "Nintendo")
+        _t("pad_confirma", "Botão que confirma", "Confirm button", "Botón que confirma")
+        _t("pad_cancela", "o outro cancela", "the other cancels", "el otro cancela")
+        _t("pad_dica", "Menu = botão extra 1, esconder interface = botão extra 2. Também vale para controle Bluetooth/USB e teclado.", "Menu = extra button 1, hide UI = extra button 2. Also applies to Bluetooth/USB controllers and keyboards.", "Menú = botón extra 1, ocultar interfaz = botón extra 2. También vale para mandos Bluetooth/USB y teclados.")
+        _t("esquerda", "Esquerda", "Left", "Izquierda")
+        _t("direita", "Direita", "Right", "Derecha")
+        _t("orientacao", "Orientação", "Orientation", "Orientación")
+        _t("or_auto", "Automática", "Automatic", "Automática")
+        _t("or_retrato", "Retrato", "Portrait", "Vertical")
+        _t("or_paisagem", "Paisagem", "Landscape", "Horizontal")
+        _t("vol_musica", "Volume da música", "Music volume", "Volumen de la música")
+        _t("vol_voz", "Volume das vozes e efeitos", "Voice and effects volume", "Volumen de voces y efectos")
+        _t("idioma_jogo", "Texto do MOON.", "MOON. text", "Texto de MOON.")
+        _t("ingles", "Inglês", "English", "Inglés")
+        _t("japones", "Japonês", "Japanese", "Japonés")
+        _t("pastas_app", "Pastas do app", "App folders", "Carpetas de la app")
+        _t("espaco_livre", "livre no armazenamento", "free on storage", "libre en el almacenamiento")
+        _t("arq_titulo", "Arquivos", "Files", "Archivos")
+        _t("arq_importar_aqui", "Importar esta pasta", "Import this folder", "Importar esta carpeta")
+        _t("arq_vazia", "Pasta vazia ou sem acesso.", "Empty folder or no access.", "Carpeta vacía o sin acceso.")
+        _t("arq_subir", "Pasta acima", "Parent folder", "Carpeta superior")
+        _t("arq_detectado", "Motor detectado nesta pasta", "Engine detected in this folder", "Motor detectado en esta carpeta")
+        _t("arq_nenhum", "Nenhum jogo detectado nesta pasta", "No game detected in this folder", "Ningún juego detectado en esta carpeta")
+        _t("arq_itens", "itens", "items", "elementos")
+        _t("arq_patch", "Toque num arquivo .json de patch para instalar", "Tap a patch .json file to install it", "Toca un archivo .json de parche para instalarlo")
+        _t("arq_medir", "Ver tamanho da pasta", "Show folder size", "Ver tamaño de la carpeta")
+        _t("pasta_jogo", "pasta de jogo", "game folder", "carpeta de juego")
+        _t("modo_titulo", "Como você quer jogar?", "How do you want to play?", "¿Cómo quieres jugar?")
+        _t("modo_novel", "Novel: botões laterais e menu de 3 pontos", "Novel: side buttons and three-dot menu", "Novela: botones laterales y menú de 3 puntos")
+        _t("modo_gamepad", "Gamepad: direcional e botões de ação", "Gamepad: D-pad and action buttons", "Gamepad: cruceta y botones de acción")
+        _t("modo_lembrar_on", "Lembrar para este jogo: sim", "Remember for this game: yes", "Recordar para este juego: sí")
+        _t("modo_lembrar_off", "Lembrar para este jogo: não", "Remember for this game: no", "Recordar para este juego: no")
+        _t("modo_trocar", "Modo de controle", "Control mode", "Modo de control")
+        _t("modo_p_gamepad", "Trocar para modo gamepad", "Switch to gamepad mode", "Cambiar a modo gamepad")
+        _t("modo_p_novel", "Trocar para modo novel", "Switch to novel mode", "Cambiar a modo novela")
+        _t("modo_n_ask", "perguntar", "ask", "preguntar")
+        _t("modo_n_novel", "novel", "novel", "novela")
+        _t("modo_n_gamepad", "gamepad", "gamepad", "gamepad")
+        _t("modo_mais", "Mais / voltar", "More / back", "Más / volver")
+        _t("esconder_ui", "Esconder interface", "Hide interface", "Ocultar interfaz")
+        _t("menu", "Menu", "Menu", "Menú")
+        _t("voltar_jogo", "Voltar ao jogo", "Back to game", "Volver al juego")
+        _t("sair_bib", "Sair para a biblioteca", "Exit to library", "Salir a la biblioteca")
+        _t("backlog", "Histórico de falas", "Backlog", "Historial")
+        _t("backlog_vazio", "Nenhuma fala ainda.", "No lines yet.", "Aún no hay diálogos.")
+        _t("auto", "Auto", "Auto", "Auto")
+        _t("skip", "Pular", "Skip", "Saltar")
+        _t("auto_on", "Auto: ligado", "Auto: on", "Auto: activado")
+        _t("auto_off", "Auto: desligado", "Auto: off", "Auto: desactivado")
+        _t("skip_on", "Pular: ligado", "Skip: on", "Saltar: activado")
+        _t("skip_off", "Pular: desligado", "Skip: off", "Saltar: desactivado")
+        _t("qsave", "Salvo rápido feito", "Quick save done", "Guardado rápido hecho")
+        _t("qsave_nada", "Nada para salvar ainda", "Nothing to save yet", "Nada que guardar todavía")
+        _t("qload_nada", "Nenhum salvo rápido", "No quick save", "Ningún guardado rápido")
+        _t("slots_salvar", "Salvar", "Save", "Guardar")
+        _t("slots_carregar", "Carregar", "Load", "Cargar")
+        _t("slot_vazio", "vazio", "empty", "vacío")
+        _t("slot_rapido", "Salvo rápido", "Quick save", "Guardado rápido")
+        _t("slot", "Espaço", "Slot", "Ranura")
+        _t("fim_capitulo", "Fim do capítulo", "End of chapter", "Fin del capítulo")
+        _t("patch_ptbr", "Patch PT-BR", "PT-BR patch", "Parche PT-BR")
+        _t("texto_jp", "Texto em japonês (original)", "Japanese text (original)", "Texto en japonés (original)")
+        _t("jp_titulo", "Idioma trocado: o jogo volta à tela de título", "Language changed: the game returns to the title screen", "Idioma cambiado: el juego vuelve a la pantalla de título")
+        _t("patch_on", "Patch PT-BR ativado", "PT-BR patch on", "Parche PT-BR activado")
+        _t("patch_off", "Patch PT-BR desativado", "PT-BR patch off", "Parche PT-BR desactivado")
+        _t("sem_patch", "Instale o patch PT-BR nos detalhes do jogo", "Install the PT-BR patch in the game details", "Instala el parche PT-BR en los detalles del juego")
+        _t("carregando", "Carregando…", "Loading…", "Cargando…")
+        _t("erro_jogo", "Não foi possível abrir o jogo", "Could not open the game", "No se pudo abrir el juego")
+        _t("mostrar_ui", "Toque para mostrar os controles", "Tap to show the controls", "Toca para mostrar los controles")
+        _t("salvo_em", "Salvo em", "Saved on", "Guardado el")
+        _t("motor_desconhecido", "Desconhecido", "Unknown", "Desconocido")
+        _t("motor_windows", "Programa do Windows (.exe)", "Windows program (.exe)", "Programa de Windows (.exe)")
+        _t("det_moon", "Pasta com moon_eng.lst (pacotes .lst/.snx do motor Tactics)", "Folder with moon_eng.lst (Tactics .lst/.snx packs)", "Carpeta con moon_eng.lst (paquetes .lst/.snx de Tactics)")
+        _t("det_renpy", "Pasta renpy/ e game/ com .rpa, .rpy ou .rpyc; versão em game/script_version.txt", "renpy/ and game/ folders with .rpa, .rpy or .rpyc; version in game/script_version.txt", "Carpetas renpy/ y game/ con .rpa, .rpy o .rpyc; versión en game/script_version.txt")
+        _t("det_unity", "Pasta *_Data com globalgamemanagers; empresa e produto em app.info", "*_Data folder with globalgamemanagers; company and product in app.info", "Carpeta *_Data con globalgamemanagers; empresa y producto en app.info")
+        _t("det_windows", "Arquivo .exe sem outro motor reconhecido", "An .exe file with no other known engine", "Un archivo .exe sin otro motor reconocido")
+        _t("pl_moon_desc", "Roda o MOON. (Tactics, 1997) a partir dos arquivos originais: converte scripts e imagens no celular e toca com o player do M.O.O.N, com save/load, auto, pular, histórico e patches de tradução.", "Runs MOON. (Tactics, 1997) from the original files: converts scripts and images on the phone and plays them in the M.O.O.N player, with save/load, auto, skip, backlog and translation patches.", "Ejecuta MOON. (Tactics, 1997) desde los archivos originales: convierte scripts e imágenes en el teléfono y los reproduce en el reproductor de M.O.O.N, con guardar/cargar, auto, saltar, historial y parches de traducción.")
+        _t("pl_renpy_desc", "Vai rodar jogos Ren'Py com o motor original do jogo (Python e módulos do Ren'Py para Android). Por enquanto o M.O.O.N já detecta o jogo, a versão do Ren'Py e mostra na biblioteca.", "Will run Ren'Py games with the game's original engine (Python and Ren'Py modules for Android). For now M.O.O.N detects the game and its Ren'Py version and lists it in the library.", "Ejecutará juegos Ren'Py con el motor original del juego (Python y módulos de Ren'Py para Android). Por ahora M.O.O.N detecta el juego y su versión de Ren'Py y lo muestra en la biblioteca.")
+        _t("pl_unity_desc", "Jogos Unity para Windows precisam de uma camada de compatibilidade. O plugin está planejado; por enquanto o jogo aparece na biblioteca com empresa e produto.", "Unity games for Windows need a compatibility layer. The plugin is planned; for now the game is listed with company and product.", "Los juegos Unity para Windows necesitan una capa de compatibilidad. El plugin está planeado; por ahora el juego aparece con empresa y producto.")
+        _t("pl_windows_desc", "Programas .exe do Windows precisam de uma camada de compatibilidade. O plugin está planejado; por enquanto o jogo só aparece na biblioteca.", "Windows .exe programs need a compatibility layer. The plugin is planned; for now the game is only listed.", "Los programas .exe de Windows necesitan una capa de compatibilidad. El plugin está planeado; por ahora el juego solo aparece en la biblioteca.")
+        _t("controles", "Controles na tela", "On-screen controls", "Controles en pantalla")
+        _t("texto_audio", "Texto e áudio", "Text and audio", "Texto y audio")
+        _t("aparencia", "Aparência", "Appearance", "Apariencia")
+        _t("st_instalado", "Pronto para jogar (plugin instalado; segure voltar para sair do jogo)", "Ready to play (plugin installed; hold back to leave the game)", "Listo para jugar (plugin instalado; mantén atrás para salir del juego)")
+        _t("host_sair_msg", "Sair do jogo e voltar à biblioteca do M.O.O.N?\nO progresso não salvo será perdido.", "Leave the game and go back to the M.O.O.N library?\nUnsaved progress will be lost.", "¿Salir del juego y volver a la biblioteca de M.O.O.N?\nSe perderá el progreso no guardado.")
+        _t("host_sair", "Sair", "Leave", "Salir")
+        _t("host_continuar", "Continuar", "Keep playing", "Seguir")
+        _t("pl_repo", "Repositório de plugins", "Plugin repository", "Repositorio de plugins")
+        _t("pl_url", "URL do index.json", "index.json URL", "URL del index.json")
+        _t("pl_url_vazia", "(não configurada - defina nas Configurações)", "(not set - set it in Settings)", "(sin configurar - defínela en Ajustes)")
+        _t("pl_url_titulo", "URL do repositório de plugins", "Plugin repository URL", "URL del repositorio de plugins")
+        _t("pl_url_dica", "Endereço do index.json (https://… ou file:///sdcard/…). Em branco: só pacotes locais.", "index.json address (https://… or file:///sdcard/…). Empty: local packs only.", "Dirección del index.json (https://… o file:///sdcard/…). Vacío: solo paquetes locales.")
+        _t("pl_atualizar_lista", "Atualizar lista", "Refresh list", "Actualizar lista")
+        _t("pl_importar_local", "Importar .moonpack de Download", "Import .moonpack from Download", "Importar .moonpack de Download")
+        _t("pl_url_editar", "Alterar URL", "Change URL", "Cambiar URL")
+        _t("pl_instalado", "Instalado", "Installed", "Instalado")
+        _t("pl_instalado_v", "instalado", "installed", "instalado")
+        _t("pl_disponivel", "disponível", "available", "disponible")
+        _t("pl_atualizacao", "atualização disponível", "update available", "actualización disponible")
+        _t("pl_remover", "Remover plugin", "Remove plugin", "Quitar plugin")
+        _t("pl_remover_confirma", "Toque de novo para remover este plugin", "Tap again to remove this plugin", "Toca de nuevo para quitar este plugin")
+        _t("pl_removido", "Plugin removido", "Plugin removed", "Plugin quitado")
+        _t("pl_instalar", "Baixar e instalar", "Download and install", "Descargar e instalar")
+        _t("pl_atualizar", "Atualizar", "Update", "Actualizar")
+        _t("pl_cancelar", "Cancelar download", "Cancel download", "Cancelar descarga")
+        _t("pl_alvo", "Para o jogo", "For the game", "Para el juego")
+        _t("pl_precisa", "precisa do plugin", "needs plugin", "necesita el plugin")
+        _t("pl_ok_exato", "versão exata instalada", "exact version installed", "versión exacta instalada")
+        _t("pl_baixar_exato", "Baixar a versão exata", "Download the exact version", "Descargar la versión exacta")
+        _t("pl_proximo_aviso", "Aviso: a versão exata não existe; o mais próximo do mesmo major.minor pode funcionar mal.", "Warning: the exact version does not exist; the closest one with the same major.minor may not work well.", "Aviso: la versión exacta no existe; la más cercana con el mismo major.minor puede funcionar mal.")
+        _t("pl_usar_proximo", "Usar o mais próximo", "Use the closest one", "Usar la más cercana")
+        _t("pl_nenhum", "Nenhum pacote para esta versão. Importe um .moonpack ou configure o repositório.", "No package for this version. Import a .moonpack or set the repository.", "Ningún paquete para esta versión. Importa un .moonpack o configura el repositorio.")
+        _t("pl_escolher_pack", "Toque em um arquivo .moonpack para instalar", "Tap a .moonpack file to install it", "Toca un archivo .moonpack para instalarlo")
+        _t("pl_tipo", "Tipo", "Type", "Tipo")
+        _t("pl_motor_versao", "Versão do motor", "Engine version", "Versión del motor")
+        _t("pl_pacote_versao", "Versão do pacote", "Package version", "Versión del paquete")
+        _t("pl_pasta", "Pasta", "Folder", "Carpeta")
+        _t("pl_pacotes", "pacotes", "packages", "paquetes")
+        _t("pl_sem_url", "Repositório não configurado", "Repository not set", "Repositorio sin configurar")
+        _t("pl_indice_erro", "Não consegui baixar o index.json", "Could not download index.json", "No pude descargar el index.json")
+        _t("pl_indice_invalido", "index.json inválido", "Invalid index.json", "index.json inválido")
+        _t("pl_pacotes_no_indice", "pacote(s) no índice", "package(s) in the index", "paquete(s) en el índice")
+        _t("pl_pacote_invalido", "Pacote inválido", "Invalid package", "Paquete inválido")
+        _t("pl_sem_pluginjson", "O pacote não tem plugin.json", "The package has no plugin.json", "El paquete no tiene plugin.json")
+        _t("pl_pluginjson_invalido", "plugin.json inválido", "Invalid plugin.json", "plugin.json inválido")
+        _t("pl_id_invalido", "id/versão inválidos (o id deve ser motor-versão_do_motor)", "invalid id/version (the id must be engine-engine_version)", "id/versión inválidos (el id debe ser motor-versión_del_motor)")
+        _t("pl_tipo_invalido", "tipo desconhecido", "unknown type", "tipo desconocido")
+        _t("pl_min_moon", "Precisa do M.O.O.N", "Needs M.O.O.N", "Necesita M.O.O.N")
+        _t("pl_arquivo_falta", "Arquivo do pacote ausente", "Package file missing", "Archivo del paquete ausente")
+        _t("pl_sha_arquivo", "sha256 não confere", "sha256 mismatch", "sha256 no coincide")
+        _t("pl_entrada_falta", "Arquivo de entrada ausente", "Entry file missing", "Archivo de entrada ausente")
+        _t("pl_arquivo_extra", "Arquivo fora da lista do plugin.json", "File not listed in plugin.json", "Archivo fuera de la lista del plugin.json")
+        _t("pl_instalacao_falhou", "Falha ao instalar", "Install failed", "Falló la instalación")
+        _t("pl_baixando", "Baixando", "Downloading", "Descargando")
+        _t("pl_verificando", "Conferindo sha256 e instalando…", "Checking sha256 and installing…", "Comprobando sha256 e instalando…")
+        _t("pl_download_erro", "Falha no download", "Download failed", "Falló la descarga")
+        _t("pl_cancelado", "Download cancelado", "Download cancelled", "Descarga cancelada")
+        _t("pl_sem_sha", "O índice não traz sha256 deste pacote", "The index has no sha256 for this package", "El índice no trae sha256 de este paquete")
+        _t("pl_sha_pacote", "O sha256 do pacote baixado não confere com o do índice", "The downloaded package sha256 does not match the index", "El sha256 del paquete descargado no coincide con el del índice")
+        _t("pl_nao_instalado", "Instale o plugin pela tela Plugins", "Install the plugin from the Plugins screen", "Instala el plugin desde la pantalla Plugins")
+        _t("pl_motor_rpgm_desc", "Roda jogos HTML5 do RPG Maker MV e MZ numa WebView em tela cheia, com saves exportados para /sdcard/MOON/saves/rpgm/.", "Runs HTML5 RPG Maker MV and MZ games in a full-screen WebView, with saves exported to /sdcard/MOON/saves/rpgm/.", "Ejecuta juegos HTML5 de RPG Maker MV y MZ en un WebView a pantalla completa, con saves exportados a /sdcard/MOON/saves/rpgm/.")
+        _t("pl_motor_tyrano_desc", "Roda jogos HTML5 do TyranoBuilder/TyranoScript numa WebView em tela cheia, com saves exportados para /sdcard/MOON/saves/tyrano/.", "Runs HTML5 TyranoBuilder/TyranoScript games in a full-screen WebView, with saves exported to /sdcard/MOON/saves/tyrano/.", "Ejecuta juegos HTML5 de TyranoBuilder/TyranoScript en un WebView a pantalla completa, con saves exportados a /sdcard/MOON/saves/tyrano/.")
+        _t("pl_motor_godot_desc", "Jogos Godot com .pck: o plugin traz o motor da versão exata do jogo. Pacotes por versão (godot-4.7.2…).", "Godot games with .pck: the plugin brings the engine of the game's exact version. One package per version (godot-4.7.2…).", "Juegos Godot con .pck: el plugin trae el motor de la versión exacta del juego. Un paquete por versión (godot-4.7.2…).")
+        _t("det_rpgm", "Pasta com www/js/rpg_core.js ou js/rpg_core.js (MV) ou js/rmmz_core.js (MZ). A versão vem de Utils.RPGMAKER_VERSION.", "Folder with www/js/rpg_core.js or js/rpg_core.js (MV) or js/rmmz_core.js (MZ). The version comes from Utils.RPGMAKER_VERSION.", "Carpeta con www/js/rpg_core.js o js/rpg_core.js (MV) o js/rmmz_core.js (MZ). La versión sale de Utils.RPGMAKER_VERSION.")
+        _t("det_tyrano", "Pasta com tyrano/ e data/scenario, ou index.html que cite tyrano.", "Folder with tyrano/ and data/scenario, or an index.html that mentions tyrano.", "Carpeta con tyrano/ y data/scenario, o index.html que mencione tyrano.")
+        _t("det_godot", "Pasta com um .pck (cabeçalho GDPC); a versão vem do cabeçalho do .pck.", "Folder with a .pck (GDPC header); the version comes from the .pck header.", "Carpeta con un .pck (cabecera GDPC); la versión sale de la cabecera del .pck.")
+        _t("web_sem_index", "index.html do jogo não encontrado", "Game index.html not found", "index.html del juego no encontrado")
+        _t("web_sem_shim", "Arquivo de entrada do plugin ausente", "Plugin entry file missing", "Archivo de entrada del plugin ausente")
+        _t("web_erro", "Não consegui abrir a WebView", "Could not open the WebView", "No pude abrir el WebView")
+        _t("saves", "Saves", "Saves", "Saves")
+        _t("sv_jogos", "jogo(s)", "game(s)", "juego(s)")
+        _t("sv_arquivos", "arquivo(s)", "file(s)", "archivo(s)")
+        _t("sv_pasta", "Pasta única de saves", "Single saves folder", "Carpeta única de saves")
+        _t("sv_vazio", "Nenhuma pasta de saves ainda. Importe um jogo ou jogue para criar.", "No saves folders yet. Import a game or play to create them.", "Aún no hay carpetas de saves. Importa un juego o juega para crearlas.")
+        _t("sv_exportar", "Exportar (zip)", "Export (zip)", "Exportar (zip)")
+        _t("sv_backup", "Backup", "Backup", "Copia de seguridad")
+        _t("sv_backup_tudo", "Backup de tudo", "Back up everything", "Copia de todo")
+        _t("sv_importar", "Importar zip", "Import zip", "Importar zip")
+        _t("sv_apagar", "Apagar saves", "Delete saves", "Borrar saves")
+        _t("sv_escolher_zip", "Escolha o zip de saves para importar", "Choose the saves zip to import", "Elige el zip de saves a importar")
+        _t("sv_nenhum_zip", "Nenhum .zip em Download, MOON/export ou MOON/backup.", "No .zip in Download, MOON/export or MOON/backup.", "Ningún .zip en Download, MOON/export ni MOON/backup.")
+        _t("sv_erro_zip", "Não consegui criar o zip", "Could not create the zip", "No pude crear el zip")
+        _t("sv_exportado", "Exportado", "Exported", "Exportado")
+        _t("sv_backup_ok", "Backup feito", "Backup done", "Copia hecha")
+        _t("sv_apagar_confirma", "Toque de novo para apagar os saves deste jogo (um backup é feito antes)", "Tap again to delete this game's saves (a backup is made first)", "Toca de nuevo para borrar los saves de este juego (antes se hace una copia)")
+        _t("sv_nada_apagar", "Nenhum arquivo para apagar", "No files to delete", "Ningún archivo para borrar")
+        _t("sv_apagado", "Saves apagados", "Saves deleted", "Saves borrados")
+        _t("sv_backup_auto", "backup automático", "automatic backup", "copia automática")
+        _t("sv_zip_invalido", "Zip inválido", "Invalid zip", "Zip inválido")
+        _t("sv_zip_sem_destino", "O zip não diz de qual jogo é (sem moonsave.json): abra a pasta do jogo e importe de lá", "The zip does not say which game it is for (no moonsave.json): open the game folder and import from there", "El zip no dice de qué juego es (sin moonsave.json): abre la carpeta del juego e importa desde allí")
+        _t("sv_zip_vazio", "Nenhum arquivo importado", "No files imported", "Ningún archivo importado")
+        _t("sv_importado", "Importado", "Imported", "Importado")
+        _t("sv_migrados", "saves do MOON. migrados para /sdcard/MOON/saves/moon", "MOON. saves moved to /sdcard/MOON/saves/moon", "saves de MOON. movidos a /sdcard/MOON/saves/moon")
+        _t("tema_noite", "Preto e branco", "Black and white", "Blanco y negro")
+        _t("tema_roxo", "Roxo", "Purple", "Morado")
+        _t("tema_floresta", "Floresta", "Forest", "Bosque")
+        _t("tema_custom", "Personalizado", "Custom", "Personalizado")
+        _t("tema_personalizar", "Personalizar cores", "Customize colors", "Personalizar colores")
+        _t("tema_restaurar", "Restaurar padrão (preto e branco)", "Restore default (black and white)", "Restaurar predeterminado (blanco y negro)")
+        _t("tema_restaurado", "Tema padrão restaurado", "Default theme restored", "Tema predeterminado restaurado")
+        _t("cores_titulo", "Cores do tema", "Theme colors", "Colores del tema")
+        _t("cor_0", "Fundo", "Background", "Fondo")
+        _t("cor_1", "Superfície", "Surface", "Superficie")
+        _t("cor_2", "Texto", "Text", "Texto")
+        _t("cor_3", "Texto secundário", "Secondary text", "Texto secundario")
+        _t("cor_4", "Destaque", "Accent", "Acento")
+        _t("cor_5", "Botão", "Button", "Botón")
+        _t("cor_6", "Botão pressionado", "Pressed button", "Botón pulsado")
+        _t("cor_7", "Barra", "Bar", "Barra")
+        _t("cor_8", "Borda", "Border", "Borde")
+        _t("cor_9", "Selo do motor", "Engine badge", "Sello del motor")
+        _t("cor_10", "Caixa de texto do player", "Player text box", "Caja de texto del reproductor")
+        _t("cor_hex", "Hex (digite 6 dígitos)", "Hex (type 6 digits)", "Hex (escribe 6 dígitos)")
+    }
+}
+
+vein tr(k: obsidian) -> obsidian { return cfg.tr_lang(k, cfg.lang) }

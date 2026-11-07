@@ -1,0 +1,10 @@
+{
+  "nome": "TyranoBuilder",
+  "motor": "tyrano",
+  "versoes_motor": ["5.04"],
+  "versao": "1.0.0",
+  "min_moon": "0.3.0",
+  "tipo": "webview",
+  "fontes": ["../common/moon_web.js", "shim.js"],
+  "entrada": "shim.js"
+}

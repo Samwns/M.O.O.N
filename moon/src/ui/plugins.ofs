@@ -1,0 +1,743 @@
+// M.O.O.N — gerenciador de plugins (.moonpack): instalados, indice remoto,
+// download em passos, instalacao com conferencia de sha256, escolha por versao
+// exata do motor. Formato: Moon/plugins/FORMATO.md.
+//
+// Instalados: files/plugins/<id>/<versao do pacote>/ (plugin.json + arquivos).
+// O id e sempre <motor>-<versao_motor> ("rpgm-mv-1.6.2", "renpy-8.4.1"): versoes
+// diferentes do motor ficam lado a lado.
+
+attach {F:lib.ofs}
+attach {sha256}
+attach {zip}
+attach {android_http}
+
+extern vein rename(a: obsidian, b: obsidian) -> stone
+
+namespace plg {
+    forge APP_VERSION: obsidian = "0.3.0"
+    forge root: obsidian = ""
+
+    // instalados (um por pacote)
+    forge i_id: Array<obsidian> = []
+    forge i_motor: Array<obsidian> = []
+    forge i_vm: Array<obsidian> = []
+    forge i_ver: Array<obsidian> = []
+    forge i_nome: Array<obsidian> = []
+    forge i_tipo: Array<obsidian> = []
+    forge i_dir: Array<obsidian> = []
+    forge i_entry: Array<obsidian> = []
+
+    // indice remoto
+    forge x_id: Array<obsidian> = []
+    forge x_motor: Array<obsidian> = []
+    forge x_vm: Array<obsidian> = []
+    forge x_ver: Array<obsidian> = []
+    forge x_nome: Array<obsidian> = []
+    forge x_tipo: Array<obsidian> = []
+    forge x_url: Array<obsidian> = []
+    forge x_sha: Array<obsidian> = []
+    forge x_min: Array<obsidian> = []
+    forge x_size: Array<stone> = []
+    forge index_url: obsidian = ""
+    forge index_msg: obsidian = ""
+    forge index_ok: bool = false
+
+    // ultima mensagem de instalacao/erro
+    forge msg: obsidian = ""
+
+    // download em passos
+    forge busy: bool = false
+    forge dl_stage: stone = 0          // 0 parado, 1 baixando, 2 instalando
+    forge dl_pct: stone = 0
+    forge dl_label: obsidian = ""
+    forge dl_x: stone = -1
+    forge dl_fp: *stone = null
+    forge dl_path: obsidian = ""
+    forge dl_got: stone = 0
+    forge dl_total: stone = 0
+    forge dl_buf: *stone = null
+    forge dl_fail_at: stone = 0
+
+    // alvo (jogo que precisa de plugin): preenchido por want()
+    forge w_motor: obsidian = ""
+    forge w_vm: obsidian = ""
+    forge w_game: obsidian = ""
+    forge pk_state: stone = 4          // 0 instalado exato, 1 baixar exato, 2 proximo instalado, 3 proximo no indice, 4 nada
+    forge pk_i: stone = -1             // indice em i_*
+    forge pk_x: stone = -1             // indice em x_*
+
+    vein init(files_root: obsidian) -> void {
+        root = files_root + "/plugins"
+        bx.mkdir_p(root)
+        scan()
+    }
+
+    // ── versoes ──────────────────────────────────────────────────────────
+    // "mv-1.6.2" -> variante "mv", numeros [1,6,2]
+    vein _variant(v: obsidian) -> obsidian {
+        forge n = tx.len(v)
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(v, i)
+            if (c >= 48 && c <= 57) { break }
+            i++
+        }
+        forge s = tx.sub(v, 0, i)
+        if (tx.ends(s, "-")) { s = tx.sub(s, 0, tx.len(s) - 1) }
+        return s
+    }
+    vein _num(v: obsidian, k: stone) -> stone {
+        forge n = tx.len(v)
+        forge i = 0
+        forge idx = 0
+        while (i < n) {
+            forge c = tx.at(v, i)
+            if (c >= 48 && c <= 57) {
+                forge val = 0
+                while (i < n && tx.at(v, i) >= 48 && tx.at(v, i) <= 57) {
+                    val = val * 10 + (tx.at(v, i) - 48)
+                    i++
+                }
+                if (idx == k) { return val }
+                idx++
+            } else {
+                i++
+            }
+        }
+        return 0
+    }
+    // compara numeros (>0: a maior)
+    vein ver_cmp(a: obsidian, b: obsidian) -> stone {
+        forge k = 0
+        while (k < 4) {
+            forge x = _num(a, k)
+            forge y = _num(b, k)
+            if (x != y) { return x - y }
+            k++
+        }
+        return 0
+    }
+    // mesma variante e mesmo major.minor -> distancia de patch; senao -1
+    vein closeness(a: obsidian, b: obsidian) -> stone {
+        if (!tx.eq(_variant(a), _variant(b))) { return -1 }
+        if (_num(a, 0) != _num(b, 0) || _num(a, 1) != _num(b, 1)) { return -1 }
+        forge d = _num(a, 2) - _num(b, 2)
+        if (d < 0) { d = 0 - d }
+        return d
+    }
+    // "mv-1.6.2" -> "MV 1.6.2"
+    vein ver_label(v: obsidian) -> obsidian {
+        forge va = _variant(v)
+        if (tx.len(va) == 0) { return v }
+        return tx.upper(va) + " " + tx.sub(v, tx.len(va) + 1, tx.len(v) - tx.len(va) - 1)
+    }
+
+    // ── instalados ───────────────────────────────────────────────────────
+    vein scan() -> void {
+        lib.motores_patch = []
+        i_id = []
+        i_motor = []
+        i_vm = []
+        i_ver = []
+        i_nome = []
+        i_tipo = []
+        i_dir = []
+        i_entry = []
+        forge ids = bx.list_dir(root, 2)
+        forge a = 0
+        while (a < ofs_array_len(ids)) {
+            forge id: obsidian = ofs_array_get(ids, a)
+            if (!tx.starts(id, ".")) {
+                forge vers = bx.list_dir(root + "/" + id, 2)
+                forge b = 0
+                while (b < ofs_array_len(vers)) {
+                    forge v: obsidian = ofs_array_get(vers, b)
+                    forge d = root + "/" + id + "/" + v
+                    if (bx.exists(d + "/plugin.json")) { _scan_one(id, v, d) }
+                    b++
+                }
+            }
+            a++
+        }
+    }
+
+    vein _scan_one(id: obsidian, v: obsidian, d: obsidian) -> void {
+        forge m = json.mark()
+        forge o = json.load(d + "/plugin.json")
+        if (json.is_obj(o) && tx.eq(json.gs(o, "id", ""), id)) {
+            ofs_array_push(i_id, id)
+            ofs_array_push(i_motor, tx.copy(json.gs(o, "motor", "")))
+            forge pz = json.get(o, "patches")
+            if (pz >= 0 && json.ival(pz) == 1) { ofs_array_push(lib.motores_patch, tx.copy(json.gs(o, "motor", ""))) }
+            ofs_array_push(i_vm, tx.copy(json.gs(o, "versao_motor", "")))
+            ofs_array_push(i_ver, tx.copy(json.gs(o, "versao", v)))
+            ofs_array_push(i_nome, tx.copy(json.gs(o, "nome", id)))
+            ofs_array_push(i_tipo, tx.copy(json.gs(o, "tipo", "")))
+            ofs_array_push(i_dir, d)
+            ofs_array_push(i_entry, tx.copy(json.gs(o, "entrada", "")))
+        }
+        json.release(m)
+    }
+
+    vein installed_count() -> stone { return ofs_array_len(i_id) }
+    vein find_installed(id: obsidian) -> stone {
+        forge k = 0
+        while (k < ofs_array_len(i_id)) {
+            if (tx.eq(ofs_array_get(i_id, k), id)) { return k }
+            k++
+        }
+        return -1
+    }
+    vein find_index(id: obsidian) -> stone {
+        forge k = 0
+        while (k < ofs_array_len(x_id)) {
+            if (tx.eq(ofs_array_get(x_id, k), id)) { return k }
+            k++
+        }
+        return -1
+    }
+    // ha pacote mais novo no indice para o instalado k?
+    vein has_update(k: stone) -> bool {
+        forge x = find_index(ofs_array_get(i_id, k))
+        if (x < 0) { return false }
+        return ver_cmp(ofs_array_get(x_ver, x), ofs_array_get(i_ver, k)) > 0
+    }
+
+    // ── indice remoto ────────────────────────────────────────────────────
+    vein _base_of(url: obsidian) -> obsidian {
+        forge i = tx.rfind(url, 47)
+        if (i < 0) { return "" }
+        return tx.sub(url, 0, i)
+    }
+    vein _resolve(u: obsidian) -> obsidian {
+        if (tx.starts(u, "http://") || tx.starts(u, "https://") || tx.starts(u, "file://") || tx.starts(u, "/")) { return u }
+        return _base_of(index_url) + "/" + u
+    }
+
+    vein _clear_index() -> void {
+        x_id = []
+        x_motor = []
+        x_vm = []
+        x_ver = []
+        x_nome = []
+        x_tipo = []
+        x_url = []
+        x_sha = []
+        x_min = []
+        x_size = []
+    }
+
+    // Baixa e le o index.json (bloqueia por alguns segundos; so quando o usuario pede).
+    vein fetch_index(url: obsidian) -> bool {
+        index_url = url
+        index_ok = false
+        index_msg = ""
+        if (tx.len(url) == 0) {
+            index_msg = tr("pl_sem_url")
+            return false
+        }
+        forge text = ahttp.get_text(url)
+        if (tx.len(text) == 0) {
+            index_msg = tr("pl_indice_erro") + ": " + ahttp.error
+            return false
+        }
+        return parse_index(text)
+    }
+
+    vein parse_index(text: obsidian) -> bool {
+        _clear_index()
+        forge m = json.mark()
+        forge o = json.parse(text)
+        if (!json.is_obj(o) || !json.is_arr(json.get(o, "plugins"))) {
+            json.release(m)
+            index_msg = tr("pl_indice_invalido")
+            return false
+        }
+        forge c = json.first(json.get(o, "plugins"))
+        while (c >= 0) {
+            forge id = tx.copy(json.gs(c, "id", ""))
+            forge url = tx.copy(json.gs(c, "url", json.gs(c, "arquivo", "")))
+            if (tx.len(id) > 0 && tx.len(url) > 0) {
+                ofs_array_push(x_id, id)
+                ofs_array_push(x_motor, tx.copy(json.gs(c, "motor", "")))
+                ofs_array_push(x_vm, tx.copy(json.gs(c, "versao_motor", "")))
+                ofs_array_push(x_ver, tx.copy(json.gs(c, "versao", "")))
+                ofs_array_push(x_nome, tx.copy(json.gs(c, "nome", id)))
+                ofs_array_push(x_tipo, tx.copy(json.gs(c, "tipo", "")))
+                ofs_array_push(x_url, _resolve(url))
+                ofs_array_push(x_sha, tx.lower(tx.copy(json.gs(c, "sha256", ""))))
+                ofs_array_push(x_min, tx.copy(json.gs(c, "min_moon", "0.0.0")))
+                ofs_array_push(x_size, json.gi(c, "tamanho", 0))
+            }
+            c = json.next(c)
+        }
+        json.release(m)
+        index_ok = true
+        index_msg = tx.num(ofs_array_len(x_id)) + " " + tr("pl_pacotes_no_indice")
+        return true
+    }
+
+    // ── escolha por versao exata ─────────────────────────────────────────
+    // Define pk_state/pk_i/pk_x para (motor, versao do motor do jogo).
+    vein want(motor: obsidian, vm: obsidian) -> stone {
+        w_motor = motor
+        w_vm = vm
+        pk_i = -1
+        pk_x = -1
+        forge id = motor + "-" + vm
+        forge k = find_installed(id)
+        if (k >= 0) {
+            pk_state = 0
+            pk_i = k
+            return pk_state
+        }
+        forge x = find_index(id)
+        if (x >= 0) {
+            pk_state = 1
+            pk_x = x
+            return pk_state
+        }
+        // mais proximo do mesmo major.minor (instalado ganha do indice no empate)
+        forge best = 1000000
+        forge bi = -1
+        k = 0
+        while (k < ofs_array_len(i_id)) {
+            if (tx.eq(ofs_array_get(i_motor, k), motor)) {
+                forge d = closeness(vm, ofs_array_get(i_vm, k))
+                if (d >= 0 && d < best) {
+                    best = d
+                    bi = k
+                }
+            }
+            k++
+        }
+        forge bx_i = -1
+        forge best_x = 1000000
+        x = 0
+        while (x < ofs_array_len(x_id)) {
+            if (tx.eq(ofs_array_get(x_motor, x), motor)) {
+                forge d2 = closeness(vm, ofs_array_get(x_vm, x))
+                if (d2 >= 0 && d2 < best_x) {
+                    best_x = d2
+                    bx_i = x
+                }
+            }
+            x++
+        }
+        if (bi >= 0 && best <= best_x) {
+            pk_state = 2
+            pk_i = bi
+        } else if (bx_i >= 0) {
+            pk_state = 3
+            pk_x = bx_i
+        } else {
+            pk_state = 4
+        }
+        return pk_state
+    }
+
+    // ── instalar um .moonpack ────────────────────────────────────────────
+    vein _safe_id(s: obsidian) -> bool {
+        forge n = tx.len(s)
+        if (n == 0 || n > 80) { return false }
+        forge i = 0
+        while (i < n) {
+            forge c = tx.at(s, i)
+            forge ok = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45 || c == 46 || c == 95
+            if (!ok) { return false }
+            i++
+        }
+        return !tx.starts(s, ".")
+    }
+
+    // Valida e instala (zip aberto pelo caminho). msg tem o motivo se falhar.
+    // Instalacao em passos (um arquivo do pacote por quadro): pacotes de motor
+    // (.so de 36-76 MB) levariam segundos numa chamada so e o Android mataria o
+    // app por ANR. install_pack (sincrono) fica para pacotes pequenos.
+    forge in_names: Array<obsidian> = []
+    forge in_shas: Array<obsidian> = []
+    forge in_i: stone = 0
+    forge in_id: obsidian = ""
+    forge in_ver: obsidian = ""
+    forge in_tmp: obsidian = ""
+    forge in_pj: obsidian = ""
+    forge in_del: obsidian = ""          // apagar ao terminar (pacote baixado)
+    forge sh_fp: *stone = null
+    forge in_busy: bool = false          // um arquivo do pacote esta sendo extraido em blocos
+
+    vein install_pack(path: obsidian) -> bool {
+        if (!install_begin(path)) { return false }
+        while (true) {
+            forge r = _install_step()
+            if (r != 0) { return r > 0 }
+        }
+        return false
+    }
+
+    // abre e valida (rapido); depois chame _install_step() ate devolver != 0
+    vein install_begin(path: obsidian) -> bool {
+        msg = ""
+        if (!zip.open(path)) {
+            msg = tr("pl_pacote_invalido") + ": " + zip.last_error
+            return false
+        }
+        if (!_install_open()) {
+            zip.close()
+            return false
+        }
+        return true
+    }
+
+    vein _parent_dir(p: obsidian) -> obsidian {
+        forge i = tx.len(p) - 1
+        while (i > 0) {
+            if (ofs_str_char_at(p, i) == 47) { return tx.sub(p, 0, i) }
+            i--
+        }
+        return ""
+    }
+
+    vein _install_abort(t: obsidian) -> stone {
+        in_busy = false
+        zip.xabort()
+        zip.free_data()
+        zip.close()
+        bx.remove_tree(in_tmp)
+        msg = t
+        return -1
+    }
+
+    // 0 = continua, 1 = instalado, -1 = erro (msg)
+    vein _install_step() -> stone {
+        forge n = ofs_array_len(in_names)
+        if (in_i < n) {
+            forge nm: obsidian = ofs_array_get(in_names, in_i)
+            // extracao em blocos (zip.xstep_ms): o inflate do .so de 76 MB retoma de onde parou
+            // e a interface continua respondendo a toques entre os passos
+            if (!in_busy) {
+                forge zi = zip.find(nm)
+                forge out = in_tmp + "/" + nm
+                forge pd = _parent_dir(out)
+                if (tx.len(pd) > 0) { bx.mkdir_p(pd) }
+                if (zi < 0 || !zip.xbegin(zi, out, true)) { return _install_abort(tr("pl_pacote_invalido") + ": " + zip.last_error) }
+                in_busy = true
+                dl_label = tr("pl_verificando") + " " + nm
+            }
+            forge xr = zip.xstep_ms(8)
+            if (xr < 0) { return _install_abort(tr("pl_pacote_invalido") + ": " + zip.last_error) }
+            dl_pct = (in_i * 100 + zip.xpct()) / (n + 1)
+            if (xr == 0) { return 0 }
+            in_busy = false
+            forge want: obsidian = ofs_array_get(in_shas, in_i)
+            if (!tx.eq(zip.x_sha, want)) { return _install_abort(tr("pl_sha_arquivo") + ": " + nm) }
+            in_i++
+            dl_pct = in_i * 100 / (n + 1)
+            return 0
+        }
+        zip.close()
+        bx.write_text(in_tmp + "/plugin.json", in_pj)
+        bx.mkdir_p(root + "/" + in_id)
+        bx.remove_tree(root + "/" + in_id)               // tira versoes antigas deste id
+        bx.mkdir_p(root + "/" + in_id)
+        forge dest = root + "/" + in_id + "/" + in_ver
+        if (rename(in_tmp, dest) != 0) {
+            bx.mkdir_p(dest)
+            bx.copy_tree(in_tmp, dest)
+            bx.remove_tree(in_tmp)
+        }
+        if (!bx.exists(dest + "/plugin.json")) {
+            msg = tr("pl_instalacao_falhou")
+            return -1
+        }
+        scan()
+        msg = tr("pl_instalado") + ": " + in_id + " " + in_ver
+        return 1
+    }
+
+    vein _fail(t: obsidian) -> bool {
+        msg = t
+        return false
+    }
+
+    vein _install_open() -> bool {
+        forge txt = zip.read_text("plugin.json")
+        if (tx.len(txt) == 0) { return _fail(tr("pl_sem_pluginjson")) }
+        forge m = json.mark()
+        forge o = json.parse(txt)
+        if (!json.is_obj(o)) {
+            json.release(m)
+            return _fail(tr("pl_pluginjson_invalido"))
+        }
+        forge id = tx.copy(json.gs(o, "id", ""))
+        forge motor = tx.copy(json.gs(o, "motor", ""))
+        forge vm = tx.copy(json.gs(o, "versao_motor", ""))
+        forge ver = tx.copy(json.gs(o, "versao", ""))
+        forge minm = tx.copy(json.gs(o, "min_moon", "0.0.0"))
+        forge ent = tx.copy(json.gs(o, "entrada", ""))
+        forge tipo = tx.copy(json.gs(o, "tipo", ""))
+        if (!_safe_id(id) || !_safe_id(ver) || !_safe_id(motor) || !_safe_id(vm) || !tx.eq(id, motor + "-" + vm)) {
+            json.release(m)
+            return _fail(tr("pl_id_invalido") + ": " + id)
+        }
+        if (!(tx.eq(tipo, "webview") || tx.eq(tipo, "native") || tx.eq(tipo, "dex"))) {
+            json.release(m)
+            return _fail(tr("pl_tipo_invalido") + ": " + tipo)
+        }
+        if (ver_cmp(minm, APP_VERSION) > 0) {
+            json.release(m)
+            return _fail(tr("pl_min_moon") + " " + minm)
+        }
+        // arquivos: confere o sha256 de cada um ANTES de gravar; nada fora da lista
+        forge arqs = json.get(o, "arquivos")
+        forge names: Array<obsidian> = []
+        forge shas: Array<obsidian> = []
+        forge c = json.first(arqs)
+        while (c >= 0) {
+            forge nm = tx.copy(json.key(c))
+            forge want_sha = tx.lower(tx.copy(json.sval(c)))
+            forge zi = zip.find(nm)
+            if (!zip.safe_name(nm) || zi < 0) {
+                json.release(m)
+                return _fail(tr("pl_arquivo_falta") + ": " + nm)
+            }
+            ofs_array_push(names, nm)
+            ofs_array_push(shas, want_sha)
+            c = json.next(c)
+        }
+        json.release(m)
+        if (ofs_array_len(names) == 0 || zip.find(ent) < 0) { return _fail(tr("pl_entrada_falta")) }
+        forge z = 0
+        while (z < zip.count()) {
+            forge zn = zip.name(z)
+            if (!zip.is_dir(z) && !tx.eq(zn, "plugin.json")) {
+                forge listed = false
+                forge q = 0
+                while (q < ofs_array_len(names)) {
+                    if (tx.eq(zn, ofs_array_get(names, q))) { listed = true }
+                    q++
+                }
+                if (!listed) { return _fail(tr("pl_arquivo_extra") + ": " + zn) }
+            }
+            z++
+        }
+        // extracao em passos (_install_step) para .tmp e troca no fim
+        in_names = names
+        in_shas = shas
+        in_i = 0
+        in_busy = false
+        in_id = id
+        in_ver = ver
+        in_pj = txt
+        in_tmp = root + "/.tmp/" + id + "-" + ver
+        bx.remove_tree(in_tmp)
+        bx.mkdir_p(in_tmp)
+        return true
+    }
+
+    vein remove(k: stone) -> void {
+        if (k < 0 || k >= ofs_array_len(i_id)) { return }
+        forge id: obsidian = ofs_array_get(i_id, k)
+        if (tx.len(id) > 0 && tx.starts(ofs_array_get(i_dir, k), root + "/")) { bx.remove_tree(root + "/" + id) }
+        scan()
+    }
+
+    // ── download em passos ───────────────────────────────────────────────
+    vein start_download(x: stone) -> bool {
+        if (busy || x < 0 || x >= ofs_array_len(x_id)) { return false }
+        msg = ""
+        forge url: obsidian = ofs_array_get(x_url, x)
+        if (ver_cmp(ofs_array_get(x_min, x), APP_VERSION) > 0) {
+            msg = tr("pl_min_moon") + " " + ofs_array_get(x_min, x)
+            return false
+        }
+        bx.mkdir_p(root + "/.dl")
+        dl_path = root + "/.dl/" + ofs_array_get(x_id, x) + ".moonpack"
+        bx.delete(dl_path)
+        dl_label = tr("pl_baixando") + " " + ofs_array_get(x_id, x)
+        dl_pct = 0
+        if (!ahttp.open(url)) {
+            msg = tr("pl_download_erro") + ": " + ahttp.error
+            return false
+        }
+        dl_fp = fopen(dl_path, "wb")
+        if (dl_fp == null) {
+            ahttp.close()
+            msg = tr("pl_download_erro")
+            return false
+        }
+        if (dl_buf == null) { dl_buf = ofs_alloc(ahttp.CHUNK + 8) }
+        dl_x = x
+        dl_got = 0
+        dl_total = ahttp.length
+        if (dl_total <= 0) { dl_total = ofs_array_get(x_size, x) }
+        dl_stage = 1
+        busy = true
+        oal.set_animating(true)
+        return true
+    }
+
+    vein cancel() -> void {
+        if (!busy) { return }
+        _end_download()
+        bx.delete(dl_path)
+        msg = tr("pl_cancelado")
+    }
+
+    vein _end_download() -> void {
+        if (dl_fp != null) {
+            fclose(dl_fp)
+            dl_fp = null
+        }
+        ahttp.close()
+        busy = false
+        dl_stage = 0
+        oal.set_animating(false)
+    }
+
+    // um passo por quadro; devolve true quando terminou (com ou sem erro)
+    vein step() -> bool {
+        if (!busy) { return false }
+        if (dl_stage == 1) {
+            forge n = ahttp.read(dl_buf)
+            if (n < 0) {
+                msg = tr("pl_download_erro") + ": " + ahttp.error
+                _end_download()
+                bx.delete(dl_path)
+                return true
+            }
+            if (n > 0) {
+                fwrite(dl_buf, 1, n, dl_fp)
+                dl_got = dl_got + n
+                if (dl_total > 0) { dl_pct = dl_got * 100 / dl_total }
+                if (dl_pct > 99) { dl_pct = 99 }
+                dl_label = tr("pl_baixando") + " " + ofs_array_get(x_id, dl_x) + " — " + lib.human_size(dl_got)
+                return false
+            }
+            fclose(dl_fp)
+            dl_fp = null
+            ahttp.close()
+            dl_stage = 2
+            dl_label = tr("pl_verificando")
+            return false
+        }
+        // etapa 2: sha256 do pacote inteiro, em blocos de ~2 MB por quadro
+        if (dl_stage == 2) {
+            if (sh_fp == null) {
+                sha256.init()
+                sh_fp = fopen(dl_path, "rb")
+                dl_got = 0
+                if (sh_fp == null) { return _dl_finish(tr("pl_download_erro")) }
+            }
+            forge k = 0
+            while (k < 32) {
+                forge got_n = fread(dl_buf, 1, ahttp.CHUNK, sh_fp)
+                if (got_n <= 0) { break }
+                sha256.update(dl_buf as stone, got_n)
+                dl_got = dl_got + got_n
+                k++
+            }
+            if (k == 32) {
+                if (dl_total > 0) { dl_pct = dl_got * 100 / dl_total }
+                return false
+            }
+            fclose(sh_fp)
+            sh_fp = null
+            forge want_sha: obsidian = ofs_array_get(x_sha, dl_x)
+            forge got = sha256.final()
+            if (tx.len(want_sha) == 0) { return _dl_finish(tr("pl_sem_sha")) }
+            if (!tx.eq(got, want_sha)) { return _dl_finish(tr("pl_sha_pacote")) }
+            if (!install_begin(dl_path)) { return _dl_finish(msg) }
+            in_del = dl_path
+            dl_stage = 3
+            dl_pct = 0
+            return false
+        }
+        // etapa 3: um arquivo do pacote por quadro
+        forge r = _install_step()
+        if (r == 0) { return false }
+        if (tx.len(in_del) > 0) { bx.delete(in_del) }
+        in_del = ""
+        busy = false
+        dl_stage = 0
+        dl_pct = 100
+        oal.set_animating(false)
+        return true
+    }
+
+    vein _dl_finish(t: obsidian) -> bool {
+        if (sh_fp != null) {
+            fclose(sh_fp)
+            sh_fp = null
+        }
+        msg = t
+        bx.delete(dl_path)
+        busy = false
+        dl_stage = 0
+        dl_pct = 100
+        oal.set_animating(false)
+        return true
+    }
+
+    // ── escolha por jogo e estado na biblioteca ──────────────────────────
+    // files/plugins/choices.json: {"<id do jogo>": "<id do pacote>"} — o usuario confirmou
+    // usar o pacote mais proximo (mesmo major.minor) para esse jogo.
+    vein choice_get(gid: obsidian) -> obsidian {
+        forge m = json.mark()
+        forge o = json.load(root + "/choices.json")
+        forge r = ""
+        if (json.is_obj(o)) { r = tx.copy(json.gs(o, gid, "")) }
+        json.release(m)
+        return r
+    }
+    vein choice_set(gid: obsidian, id: obsidian) -> void {
+        forge m = json.mark()
+        forge o = json.load(root + "/choices.json")
+        if (!json.is_obj(o)) { o = json.obj() }
+        json.put_s(o, gid, id)
+        json.save(root + "/choices.json", o, "  ")
+        json.release(m)
+    }
+
+    // pacote instalado que roda o jogo i: versao exata, ou a escolha confirmada. -1 se nenhum.
+    vein resolve_installed(i: stone) -> stone {
+        forge e: obsidian = ofs_array_get(lib.g_engine, i)
+        forge v: obsidian = ofs_array_get(lib.g_engver, i)
+        forge k = find_installed(e + "-" + v)
+        if (k >= 0) { return k }
+        forge ch = choice_get(ofs_array_get(lib.g_id, i))
+        if (tx.len(ch) > 0) { return find_installed(ch) }
+        return -1
+    }
+
+    // preenche lib.p_ok (0 sem plugin, 1 webview pronto, 2 instalado mas motor nao roda ainda)
+    vein refresh_status() -> void {
+        lib.p_ok = []
+        forge i = 0
+        while (i < lib.count()) {
+            forge st = 0
+            if (lib.is_plugin_engine(ofs_array_get(lib.g_engine, i))) {
+                forge k = resolve_installed(i)
+                if (k >= 0) {
+                    st = 2
+                    if (tx.eq(ofs_array_get(i_tipo, k), "webview")) { st = 1 }
+                }
+            }
+            ofs_array_push(lib.p_ok, st)
+            i++
+        }
+    }
+
+    // Instala um .moonpack local (Download).
+    vein import_local(path: obsidian) -> bool {
+        if (busy) { return false }
+        if (!install_begin(path)) { return false }
+        if (dl_buf == null) { dl_buf = ofs_alloc(ahttp.CHUNK + 8) }
+        in_del = ""
+        busy = true
+        dl_stage = 3
+        dl_pct = 0
+        dl_label = tr("pl_verificando")
+        oal.set_animating(true)
+        return true
+    }
+}

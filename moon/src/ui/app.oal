@@ -1,0 +1,565 @@
+// M.O.O.N — interface completa em OAL (Android).
+// Logica em app.ofs; a ordem das telas define app.S_* (biblioteca = 0 ...).
+use "app.ofs"
+
+app "M.O.O.N" "com.fixedseat.moon"
+  version "0.3.0"
+  icon "../../android/moon_icon.png"
+  assets "../../android/assets"
+  orientation any
+  permission android.permission.MANAGE_EXTERNAL_STORAGE storage
+  permission INTERNET
+
+style button.primario
+  curve 24
+
+style button.perigo
+  fill #5a2333
+  ink #ffd6de
+  pressed fill #7d2f45
+
+style button.aviso
+  fill #4d3d12
+  ink #ffe39a
+  pressed fill #6b561a
+
+style button.desativado
+  fill #2c2c3a
+  ink #9a9ab0
+  pressed fill #3a3a4c
+
+style fab.ctrl
+  curve 28
+
+// 0 ─────────────────────────────────────────────────────────────────────
+screen biblioteca
+  bar "" logo=moon
+    button.icon "menu" -> app.abrir_menu
+  if !app.perm()
+    title tr("perm_titulo")
+    text tr("perm_texto")
+    text tr("perm_passos")
+    button.primario tr("perm_botao") icon=shield -> app.pedir_permissao
+  else
+    field tr("buscar") value=lib.query icon=search -> @busca
+    text lib.resumo()
+    grid jogos from lib.jogos columns=2 landscape=4
+      card title=item.nome sub=item.sub image=item.capa icon=item.icone badge=item.motor badge_icon=item.icone long=app.menu_jogo(item) -> app.abrir_detalhes(item)
+      empty tr("vazio_bib")
+    fab.icon "plus" -> app.abrir_importar
+  navbar
+    tab tr("biblioteca") icon=home selected=app.nav_sel(0) -> app.aba_bib
+    tab tr("saves") icon=save selected=app.nav_sel(1) -> app.aba_saves
+    tab tr("plugins") icon=plugins selected=app.nav_sel(2) -> app.aba_plugins
+    tab tr("config") icon=settings selected=app.nav_sel(3) -> app.aba_config
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("m_arquivos") icon=folder -> app.menu_arquivos
+      item title=tr("m_atualizar_bib") icon=reload -> app.menu_atualizar_bib
+      item title=tr("config") icon=settings -> app.menu_config
+      item title=tr("sobre") icon=info -> app.menu_sobre
+  if app.pop_is(2)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item title=tr("jogar") icon=play -> app.pop_jogo_jogar
+      item title=tr("m_detalhes") icon=info -> app.pop_jogo_detalhes
+      item title=app.modo_rotulo() icon=gamepad -> app.menu_jogo_modo
+      item title=tr("renomear") icon=edit -> app.menu_det_renomear
+      item title=tr("trocar_capa") icon=image -> app.menu_det_capa
+      item.perigo title=tr("apagar_bib") icon=trash -> app.pop_apagar
+      item.perigo title=tr("apagar_arq") icon=trash show=app.pop_tem_dados() -> app.pop_apagar_arq
+  if app.pop_is(3)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("apagar_so_bib") icon=trash -> app.pop_apagar_ok
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+  if app.pop_is(4)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("pop_seguir") icon=trash -> app.pop_apagar_arq2
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+  if app.pop_is(8)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("apagar_tudo") icon=trash -> app.pop_apagar_arq_ok
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+  if app.pop_is(10)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item title=tr("modo_novel") icon=bookmark -> app.pop_modo_novel
+      item title=tr("modo_gamepad") icon=gamepad -> app.pop_modo_gamepad
+      item title=tr("modo_lembrar_on") icon=check show=app.md_lembrar_on() -> app.pop_modo_lembrar
+      item title=tr("modo_lembrar_off") icon=close show=!app.md_lembrar_on() -> app.pop_modo_lembrar
+
+// 1 ─────────────────────────────────────────────────────────────────────
+screen importar
+  bar tr("imp_titulo")
+    button.icon "back" -> app.voltar
+    button.icon "menu" -> app.abrir_menu
+  if imp.busy
+    title tr("imp_conv")
+    text imp.src
+    progress imp.label value=imp.pct
+    text tr("imp_aviso")
+    button.perigo tr("imp_cancelar") icon=close -> imp.cancel
+  else
+    text tr("imp_texto")
+    list candidatos from imp.cands
+      item title=item.nome sub=item.sub icon=item.icone badge=item.motor badge_icon=item.icone -> app.importar_cand(item)
+      empty tr("imp_vazio")
+    button tr("imp_outra") icon=folder -> app.abrir_arquivos
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("m_atualizar") icon=reload -> app.menu_importar_lista
+      item title=tr("m_arquivos") icon=folder -> app.menu_arquivos
+
+// 2 ─────────────────────────────────────────────────────────────────────
+screen detalhes
+  bar app.det_nome()
+    button.icon "back" -> @back
+    button.icon "menu" -> app.abrir_menu
+  if app.det_tem_capa()
+    image app.det_capa() height=220
+  title app.det_nome()
+  text app.det_info()
+  title tr("descricao")
+  text app.det_desc()
+  button tr("descricao_editar") icon=edit -> app.abrir_descricao
+  if app.det_tem_shots()
+    title tr("screenshots")
+    grid shots from app.shots columns=3 landscape=6
+      card title="" image=item.caminho -> app.noop
+  if app.det_status()==0
+    button.primario tr("jogar") icon=play -> app.jogar
+    button app.modo_rotulo() icon=gamepad -> app.modo_ciclar
+    if app.det_e_moon()
+      if app.det_tem_save()
+        button tr("continuar") icon=history -> app.continuar
+      button tr("carregar") icon=load -> app.abrir_slots_load
+    else
+      button tr("saves") icon=save -> app.abrir_saves_jogo
+  if app.det_status()==1
+    button.aviso tr("instalar_plugin") icon=plugins -> app.instalar_plugin
+  if app.det_status()==2
+    button.desativado tr("nao_suportado") icon=close -> app.nao_suportado
+  if app.det_status()==3
+    button.desativado tr("nao_suportado") icon=close -> app.nao_suportado
+  if app.det_status()==4
+    button.primario tr("jogar") icon=play -> app.jogar_host
+    button app.modo_rotulo() icon=gamepad -> app.modo_ciclar
+  if app.det_patches()
+    title tr("patches")
+    list patches from app.patches
+      item title=item.nome sub=item.sub icon=item.icone -> app.patch_toggle(item)
+      empty tr("patch_nenhum")
+    if app.patch_tem_sel()
+      button.perigo tr("patch_remover") icon=trash -> app.patch_remover
+    button tr("patch_incluso") icon=download -> app.patch_incluso
+    button tr("patch_arquivo") icon=file -> app.patch_de_arquivo
+    button tr("patch_exportar") icon=save -> app.patch_exportar
+  row
+    button tr("renomear") icon=edit -> app.abrir_renomear
+    button tr("trocar_capa") icon=image -> app.abrir_capa
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("renomear") icon=edit -> app.menu_det_renomear
+      item title=tr("trocar_capa") icon=image -> app.menu_det_capa
+      item title=tr("m_descricao") icon=edit -> app.menu_det_desc
+      item title=tr("config") icon=settings -> app.menu_config
+      item.perigo title=tr("apagar_bib") icon=trash -> app.pop_apagar
+      item.perigo title=tr("apagar_arq") icon=trash show=app.pop_tem_dados() -> app.pop_apagar_arq
+  if app.pop_is(3)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("apagar_so_bib") icon=trash -> app.pop_apagar_ok
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+  if app.pop_is(4)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("pop_seguir") icon=trash -> app.pop_apagar_arq2
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+  if app.pop_is(8)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("apagar_tudo") icon=trash -> app.pop_apagar_arq_ok
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+  if app.pop_is(10)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item title=tr("modo_novel") icon=bookmark -> app.pop_modo_novel
+      item title=tr("modo_gamepad") icon=gamepad -> app.pop_modo_gamepad
+      item title=tr("modo_lembrar_on") icon=check show=app.md_lembrar_on() -> app.pop_modo_lembrar
+      item title=tr("modo_lembrar_off") icon=close show=!app.md_lembrar_on() -> app.pop_modo_lembrar
+
+// 3 ─────────────────────────────────────────────────────────────────────
+screen renomear
+  bar tr("renomear")
+    button.icon "back" -> @back
+    button.icon "check" -> app.renomear_ok
+  text tr("nome")
+  field tr("nome") value=app.edit_show() icon=edit -> app.noop
+  keyboard -> app.edit_tecla(item)
+
+// 4 ─────────────────────────────────────────────────────────────────────
+screen capa
+  bar tr("capa_titulo")
+    button.icon "back" -> @back
+  grid capas from lib.capas columns=3 landscape=5
+    card title=item.nome image=item.img icon=app.det_icone() -> app.escolher_capa(item)
+    empty tr("capa_vazio")
+
+// 5 ─────────────────────────────────────────────────────────────────────
+screen plugins
+  bar tr("plugins")
+    button.icon "menu" -> app.abrir_menu
+  if app.plg_busy()
+    progress app.plg_label() value=plg.dl_pct
+    button.perigo tr("pl_cancelar") icon=close -> app.plg_cancelar
+  if app.plg_tem_alvo()
+    title app.plg_alvo_titulo()
+    text app.plg_alvo_texto()
+    if app.plg_alvo_acao()==1
+      button.primario tr("pl_baixar_exato") icon=download -> app.plg_alvo_baixar
+    if app.plg_alvo_acao()==2
+      button.aviso tr("pl_usar_proximo") icon=check -> app.plg_alvo_usar
+    if app.plg_alvo_acao()==3
+      button.aviso tr("pl_usar_proximo") icon=download -> app.plg_alvo_baixar
+  title tr("pl_repo")
+  text app.plg_repo_texto()
+  row
+    button tr("pl_atualizar_lista") icon=reload -> app.plg_atualizar
+    button tr("pl_url_editar") icon=edit -> app.plg_editar_url
+  button tr("pl_importar_local") icon=folder -> app.plg_importar_local
+  text app.plg_msg()
+  list motores from app.plugs
+    item title=item.nome sub=item.estado icon=item.icone badge=item.badge badge_icon=item.icone long=app.menu_plg(item) -> app.abrir_plugin(item)
+  navbar
+    tab tr("biblioteca") icon=home selected=app.nav_sel(0) -> app.aba_bib
+    tab tr("saves") icon=save selected=app.nav_sel(1) -> app.aba_saves
+    tab tr("plugins") icon=plugins selected=app.nav_sel(2) -> app.aba_plugins
+    tab tr("config") icon=settings selected=app.nav_sel(3) -> app.aba_config
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("m_atualizar") icon=reload -> app.menu_plg_atualizar
+      item title=tr("pl_importar_local") icon=folder -> app.menu_plg_local
+      item title=tr("pl_url_editar") icon=edit -> app.menu_plg_url
+  if app.pop_is(6)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item title=tr("m_abrir") icon=plugins -> app.pop_plg_abrir
+      item title=tr("pl_instalar") icon=download show=app.pop_plg_baixar_ok() -> app.pop_plg_baixar
+      item.perigo title=tr("pl_remover") icon=trash show=app.pop_plg_instalado() -> app.pop_plg_remover
+  if app.pop_is(9)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("pl_remover") icon=trash -> app.pop_plg_remover_ok
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+
+// 6 ─────────────────────────────────────────────────────────────────────
+screen plugin
+  bar app.pl_nome()
+    button.icon "back" -> @back
+  list
+    item title=app.pl_nome() sub=app.pl_estado() icon=app.pl_icone()
+  text app.pl_desc()
+  title tr("pl_deteccao")
+  text app.pl_det()
+  title tr("pl_jogos")
+  list jogos_do_motor from app.pljogos
+    item title=item.nome sub=item.sub icon=item.icone -> app.pljogo_abrir(item)
+    empty "—"
+
+// 7 ─────────────────────────────────────────────────────────────────────
+screen configuracoes
+  if app.nav_visivel()
+    bar tr("config")
+      button.icon "menu" -> app.abrir_menu
+  else
+    bar tr("config")
+      button.icon "back" -> @back
+  tabs
+    tab tr("aba_config") icon=settings selected=cfg.settings_tab==0 -> app.aba(0)
+    tab tr("aba_pers") icon=palette selected=cfg.settings_tab==1 -> app.aba(1)
+  if cfg.settings_tab==0
+    title tr("idioma")
+    tabs
+      tab "Português" icon=globe selected=app.lang_is("pt") -> app.set_lang(0)
+      tab "English" selected=app.lang_is("en") -> app.set_lang(1)
+      tab "Español" selected=app.lang_is("es") -> app.set_lang(2)
+    title tr("armazenamento")
+    text app.storage_info()
+    button tr("abrir_pasta_app") icon=folder -> app.abrir_pasta_app
+    title tr("permissoes")
+    text app.perm_text()
+    button tr("perm_botao") icon=shield -> app.pedir_permissao
+    title tr("plugins")
+    text app.plg_repo_texto()
+    button tr("pl_url_editar") icon=edit -> app.plg_editar_url
+    button tr("plugins") icon=plugins -> app.abrir_plugins
+    title tr("sobre")
+    text tr("sobre_texto")
+  else
+    title tr("aparencia")
+    text tr("tema")
+    list temas from app.temas
+      item title=item.nome sub=item.sub icon=item.icone -> app.set_theme(item)
+    button tr("tema_personalizar") icon=palette -> app.abrir_cores
+    button.aviso tr("tema_restaurar") icon=reload -> app.restaurar_tema
+    slider tr("tam_texto") icon=text value=cfg.text_size min=80 max=150 -> app.set_text_size(item)
+    title tr("texto_audio")
+    slider tr("vel_texto") icon=auto value=cfg.text_speed min=0 max=120 -> app.set_speed(item)
+    slider tr("auto_espera") icon=history value=cfg.auto_delay min=3 max=50 -> app.set_auto(item)
+    slider tr("vol_musica") icon=volume value=cfg.vol_bgm min=0 max=100 -> app.set_bgm(item)
+    slider tr("vol_voz") icon=volume value=cfg.vol_voice min=0 max=100 -> app.set_voice(item)
+    title tr("controles")
+    slider tr("opac_ctrl") icon=eye value=cfg.ctrl_opacity min=20 max=100 -> app.set_opac(item)
+    slider tr("tam_ctrl") icon=resize value=cfg.ctrl_size min=60 max=140 -> app.set_csize(item)
+    text tr("lado_dpad")
+    tabs
+      tab tr("esquerda") icon=joystick selected=cfg.dpad_side==0 -> app.set_side(0)
+      tab tr("direita") icon=joystick selected=cfg.dpad_side==1 -> app.set_side(1)
+    title tr("gamepad")
+    tabs
+      tab tr("pad_mostrar") icon=gamepad selected=cfg.pad_show==1 -> app.set_pad_show(1)
+      tab tr("pad_ocultar") icon=eye_off selected=cfg.pad_show==0 -> app.set_pad_show(0)
+    text tr("pad_auto_ocultar")
+    tabs
+      tab tr("nao") icon=close selected=cfg.pad_auto==0 -> app.set_pad_auto(0)
+      tab tr("sim") icon=check selected=cfg.pad_auto==1 -> app.set_pad_auto(1)
+    text tr("pad_estilo")
+    tabs
+      tab tr("pad_teclado") icon=keyboard selected=cfg.pad_style==0 -> app.set_pad_style(0)
+      tab tr("pad_xbox") icon=gamepad selected=cfg.pad_style==1 -> app.set_pad_style(1)
+      tab tr("pad_play") icon=btn_circle selected=cfg.pad_style==2 -> app.set_pad_style(2)
+      tab tr("pad_nintendo") icon=gamepad selected=cfg.pad_style==3 -> app.set_pad_style(3)
+    text tr("pad_confirma")
+    if cfg.pad_style==0
+      tabs
+        tab "Enter" icon=enter selected=!app.pad_swapped() -> app.set_pad_swap(0)
+        tab "Esc" icon=close selected=app.pad_swapped() -> app.set_pad_swap(1)
+    if cfg.pad_style==2
+      tabs
+        tab "ocidental" icon=btn_cross selected=!app.pad_swapped() -> app.set_pad_swap(0)
+        tab "japonês" icon=btn_circle selected=app.pad_swapped() -> app.set_pad_swap(1)
+    if cfg.pad_style==1||cfg.pad_style==3
+      tabs
+        tab "A" icon=check selected=!app.pad_swapped() -> app.set_pad_swap(0)
+        tab "B" icon=close selected=app.pad_swapped() -> app.set_pad_swap(1)
+    text tr("pad_dica")
+    text tr("orientacao")
+    tabs
+      tab tr("or_auto") icon=rotate selected=cfg.orientation==0 -> app.set_orient(0)
+      tab tr("or_retrato") icon=portrait selected=cfg.orientation==1 -> app.set_orient(1)
+      tab tr("or_paisagem") icon=landscape selected=cfg.orientation==2 -> app.set_orient(2)
+  if app.nav_visivel()
+    navbar
+      tab tr("biblioteca") icon=home selected=app.nav_sel(0) -> app.aba_bib
+      tab tr("saves") icon=save selected=app.nav_sel(1) -> app.aba_saves
+      tab tr("plugins") icon=plugins selected=app.nav_sel(2) -> app.aba_plugins
+      tab tr("config") icon=settings selected=app.nav_sel(3) -> app.aba_config
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("m_arquivos") icon=folder -> app.menu_arquivos
+      item title=tr("abrir_pasta_app") icon=folder -> app.menu_pasta_app
+
+// 8 ─────────────────────────────────────────────────────────────────────
+screen arquivos
+  bar arq.title()
+    button.icon "back" -> @back
+    button.icon "menu" -> app.abrir_menu
+  tabs
+    tab "/sdcard" icon=storage selected=app.arq_root_is(0) -> app.arq_root(0)
+    tab "Download" icon=download selected=app.arq_root_is(1) -> app.arq_root(1)
+    tab "M.O.O.N" icon=moon selected=app.arq_root_is(2) -> app.arq_root(2)
+  text arq.here_label
+  text arq.info()
+  if app.arq_pode_importar()
+    button.primario tr("arq_importar_aqui") icon=import -> app.arq_importar
+  button tr("arq_medir") icon=resize -> arq.measure
+  list entradas from arq.entries
+    item title=item.nome sub=item.info icon=item.icone -> app.arq_abrir(item)
+    empty tr("arq_vazia")
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("m_subir") icon=up -> app.menu_arq_subir
+      item title=tr("config") icon=settings -> app.menu_config
+
+// 9 ─────────────────────────────────────────────────────────────────────
+screen player
+  canvas full draw=player.paint touch=player.touch
+  if player.show_controls()
+    fab.ctrl.icon "menu" corner=top_right -> app.pj_abrir
+    if !app.pj_gamepad()
+      portrait
+        fab.ctrl.icon "hamburger" corner=bottom_row -> app.pausa
+        fab.ctrl.icon "save" corner=bottom_row -> player.quick_save
+        fab.ctrl.icon "load" corner=bottom_row -> app.quick_load
+        fab.ctrl.icon player.icon_auto() corner=bottom_row -> player.toggle_auto
+        fab.ctrl.icon player.icon_skip() corner=bottom_row -> player.toggle_skip
+        fab.ctrl.icon "backlog" corner=bottom_row -> app.abrir_backlog
+        fab.ctrl.icon "eye_off" corner=top_right -> player.toggle_hide
+        fab.ctrl.icon player.orient_icon() corner=top_right -> player.toggle_orientation
+      landscape
+        fab.ctrl.icon "hamburger" corner=left_column -> app.pausa
+        fab.ctrl.icon "save" corner=left_column -> player.quick_save
+        fab.ctrl.icon "load" corner=left_column -> app.quick_load
+        fab.ctrl.icon "eye_off" corner=left_column -> player.toggle_hide
+        fab.ctrl.icon player.icon_auto() corner=right_column -> player.toggle_auto
+        fab.ctrl.icon player.icon_skip() corner=right_column -> player.toggle_skip
+        fab.ctrl.icon "backlog" corner=right_column -> app.abrir_backlog
+        fab.ctrl.icon player.orient_icon() corner=right_column -> player.toggle_orientation
+    if app.pad_visible()
+      dpad.ctrl corner=app.dpad_corner() -> player.dpad(item)
+      diamond.ctrl look=cfg.pad_style corner=app.diamond_corner() -> app.pad(item)
+  if app.pop_is(11)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item title=tr("salvar") icon=save show=app.pj_ver(0) -> app.pj_salvar
+      item title=tr("carregar") icon=load show=app.pj_ver(0) -> app.pj_carregar
+      item title=tr("auto") icon=auto show=app.pj_ver(0) -> app.pj_auto
+      item title=tr("skip") icon=skip show=app.pj_ver(0) -> app.pj_skip
+      item title=tr("backlog") icon=backlog show=app.pj_ver(0) -> app.pj_hist
+      item title=tr("esconder_ui") icon=eye_off show=app.pj_ver(1) -> app.pj_esconder
+      item title=tr("orientacao") icon=resize show=app.pj_ver(1) -> app.pj_orient
+      item title=tr("modo_p_gamepad") icon=gamepad show=app.pj_ver(1)&&!app.pj_gamepad() -> app.pj_trocar
+      item title=tr("modo_p_novel") icon=bookmark show=app.pj_ver(1)&&app.pj_gamepad() -> app.pj_trocar
+      item title=tr("config") icon=settings show=app.pj_ver(1) -> app.pj_cfg
+      item title=tr("sair_bib") icon=home show=app.pj_ver(1) -> app.pj_sair
+      item title=tr("modo_mais") icon=forward show=app.pj_ver_mais() -> app.pj_mais
+
+// 10 ────────────────────────────────────────────────────────────────────
+screen pausa
+  bar tr("menu")
+    button.icon "back" -> app.voltar_jogo
+  list
+    item title=tr("voltar_jogo") icon=play -> app.voltar_jogo
+    item title=tr("salvar") icon=save -> app.abrir_slots_save
+    item title=tr("carregar") icon=load -> app.abrir_slots_load
+    item title=tr("backlog") icon=backlog -> app.abrir_backlog
+    item title=tr("config") icon=settings -> app.abrir_config
+    item title=tr("sair_bib") icon=home -> app.sair_jogo
+  toggle tr("patch_ptbr") icon=globe value=app.patch_on() -> app.set_patch(item)
+  if player.has_jp()
+    toggle tr("texto_jp") icon=globe value=player.jp_on() -> player.set_jp(item)
+  slider tr("vol_musica") icon=volume value=cfg.vol_bgm min=0 max=100 -> app.set_bgm(item)
+
+// 11 ────────────────────────────────────────────────────────────────────
+screen slots
+  bar app.slots_titulo()
+    button.icon "back" -> @back
+  if player.active
+    tabs
+      tab tr("slots_salvar") icon=save selected=player.saving -> app.slots_modo(1)
+      tab tr("slots_carregar") icon=load selected=!player.saving -> app.slots_modo(0)
+  grid espacos from app.slots columns=2 landscape=4
+    card title=item.nome sub=item.sub image=item.img icon=save -> app.slot_tocar(item)
+
+// 12 ────────────────────────────────────────────────────────────────────
+screen backlog
+  bar tr("backlog")
+    button.icon "back" -> @back
+  text player.backlog_text()
+
+// 13 ────────────────────────────────────────────────────────────────────
+screen busca
+  bar tr("buscar")
+    button.icon "back" -> @back
+  field tr("buscar") value=app.busca_show() icon=search -> app.noop
+  keyboard -> app.busca_tecla(item)
+  grid resultados from lib.jogos columns=3 landscape=5
+    card title=item.nome sub=item.motor image=item.capa icon=item.icone -> app.abrir_detalhes(item)
+    empty tr("nada_busca")
+
+// 14 ────────────────────────────────────────────────────────────────────
+screen saves
+  bar tr("saves")
+    button.icon "menu" -> app.abrir_menu
+  text sv.crumb()
+  if sv.lvl==2
+    row
+      button.primario tr("sv_exportar") icon=download -> app.sv_exportar
+      button tr("sv_backup") icon=save -> app.sv_backup
+    row
+      button tr("sv_importar") icon=load -> app.sv_importar
+      button.perigo tr("sv_apagar") icon=trash -> app.sv_apagar
+  if sv.lvl==1
+    button tr("sv_importar") icon=load -> app.sv_importar
+  if sv.lvl==0
+    row
+      button tr("sv_backup_tudo") icon=save -> app.sv_backup_tudo
+      button tr("sv_importar") icon=load -> app.sv_importar
+  text sv.msg_text()
+  list linhas from sv.rows
+    item title=item.nome sub=item.sub icon=item.icone long=app.menu_sv(item) -> app.sv_abrir(item)
+    empty tr("sv_vazio")
+  navbar
+    tab tr("biblioteca") icon=home selected=app.nav_sel(0) -> app.aba_bib
+    tab tr("saves") icon=save selected=app.nav_sel(1) -> app.aba_saves
+    tab tr("plugins") icon=plugins selected=app.nav_sel(2) -> app.aba_plugins
+    tab tr("config") icon=settings selected=app.nav_sel(3) -> app.aba_config
+  if app.pop_is(1)
+    popup menu -> app.fechar_popup
+      item title=tr("m_subir") icon=up show=app.sv_pode_subir() -> app.menu_sv_subir
+      item title=tr("m_atualizar") icon=reload -> app.menu_sv_atualizar
+      item title=tr("sv_backup_tudo") icon=save show=sv.lvl==0 -> app.menu_sv_backup_tudo
+      item title=tr("sv_importar") icon=load -> app.menu_sv_importar
+  if app.pop_is(5)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item title=tr("m_abrir") icon=folder -> app.pop_sv_abrir
+      item title=tr("sv_exportar") icon=download show=app.sv_lvl1() -> app.pop_sv_exportar
+      item title=tr("sv_backup") icon=save show=app.sv_lvl1() -> app.pop_sv_backup
+      item.perigo title=tr("sv_apagar") icon=trash show=app.sv_lvl1() -> app.pop_sv_apagar
+  if app.pop_is(7)
+    popup sheet title=app.pop_titulo() -> app.fechar_popup
+      item.perigo title=tr("sv_apagar") icon=trash -> app.pop_sv_apagar_ok
+      item title=tr("pop_cancelar") icon=close -> app.fechar_popup
+
+// 15 ────────────────────────────────────────────────────────────────────
+screen savesimp
+  bar tr("sv_importar")
+    button.icon "back" -> @back
+  text tr("sv_escolher_zip")
+  list zips from sv.cands
+    item title=item.nome sub=item.sub icon=file -> app.sv_importar_zip(item)
+    empty tr("sv_nenhum_zip")
+
+// 16 ────────────────────────────────────────────────────────────────────
+screen pacote
+  bar app.pk_nome()
+    button.icon "back" -> @back
+  text app.pk_info()
+  if app.pk_pode_baixar()
+    button.primario app.pk_texto_baixar() icon=download -> app.pk_baixar
+  if app.pk_instalado()
+    button.perigo tr("pl_remover") icon=trash -> app.pk_remover
+
+// 17 ────────────────────────────────────────────────────────────────────
+screen urlcfg
+  bar tr("pl_url_titulo")
+    button.icon "back" -> @back
+    button.icon "check" -> app.url_ok
+  text tr("pl_url_dica")
+  field tr("pl_url") value=app.url_show() icon=edit -> app.noop
+  keyboard -> app.url_tecla(item)
+
+// 18 ────────────────────────────────────────────────────────────────────
+screen cores
+  bar tr("cores_titulo")
+    button.icon "back" -> @back
+    button.icon "reload" -> app.restaurar_tema
+  list cores from app.cores
+    item title=item.nome sub=item.sub icon=item.icone -> app.cor_abrir(item)
+
+// 19 ────────────────────────────────────────────────────────────────────
+screen cor
+  bar app.cor_nome()
+    button.icon "back" -> @back
+  colorpicker value=app.cor_valor() -> app.cor_set(item)
+  text tr("cor_hex")
+  field tr("cor_hex") value=app.hex_show() icon=edit -> app.noop
+  keyboard -> app.hex_tecla(item)
+
+on start -> app.iniciar
+on back -> app.voltar
+on pause -> app.pausou
+on resume -> app.retomou
+on rotate -> app.girou
+on frame -> app.quadro
+on key -> app.tecla
+
+// 20 ────────────────────────────────────────────────────────────────────
+screen descricao
+  bar tr("descricao")
+    button.icon "back" -> @back
+    button.icon "check" -> app.descricao_ok
+  text tr("descricao")
+  text app.desc_show()
+  keyboard -> app.desc_tecla(item)

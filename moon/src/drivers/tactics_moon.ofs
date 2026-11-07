@@ -1,0 +1,1145 @@
+// M.O.O.N — driver do MOON. (Tactics, 1997, versao Windows).
+// Porta de batch/vn_player_godot/src/drivers/TacticsMoonDriver.gd.
+//
+// Formatos (recuperados do MOON_eng.EXE):
+//   <pack>.lst : u32 count ^ 0xCCCCCCCC, depois entradas de 44 bytes
+//                {u32 offset ^ key, u32 size ^ key, char name[32] (bytes != 0 ^ 0xCC), u8 flag, pad[3]}
+//   <pack>     : dados crus; entradas com flag == 0 tem todo byte ^ 0xAA
+//   .TGF       : u32 out_len, u32 unit, RLE -> arquivo BMP do Windows
+//                00 n <n bytes> | 01 n <n*unit bytes> | k>=2 <unit bytes> (unit repetido k vezes)
+//   .SNX       : bytecode desde o offset 0, strings Shift-JIS inline terminadas em NUL, fim em 0xFF
+//   sprites    : imagem CG_<nome> + mascara CM_<nome>
+//
+// Sem dependencia de plataforma: so arquivos (bytes.ofs) e memoria.
+
+attach {hashmap}
+attach {F:../core/bytes.ofs}
+attach {F:../core/json.ofs}
+attach {F:../core/image.ofs}
+
+namespace tm {
+    forge DRIVER_ID: obsidian = "tactics_moon"
+    forge GAME_ID: obsidian = "moon"
+    forge _sjis: stone = 0
+    forge log_on: bool = true
+    forge warnings: stone = 0
+
+    vein _log(s: obsidian) -> void {
+        if (log_on) { echo(s) }
+    }
+
+    // ── deteccao ─────────────────────────────────────────────────────────
+    vein can_import(dir: obsidian) -> bool {
+        return bx.exists(dir + "/moon_eng.lst") || bx.exists(dir + "/moon_jp.lst")
+    }
+
+    // ── Shift-JIS (tabela sjis932.bin: 60 leads x 189 trails, u16 LE) ────
+    vein load_sjis(path: obsidian) -> bool {
+        _sjis = bx.read_file(path)
+        if (_sjis == 0) { return false }
+        return bx.last_len >= 22680
+    }
+
+    // Decodifica n bytes SJIS em p, anexando UTF-8 ao buffer b. Se sp, U+3000 vira espaco.
+    vein sjis_into(b: stone, p: stone, n: stone, sp: bool) -> void {
+        forge i = 0
+        while (i < n) {
+            forge c = bx.gb(p, i)
+            if (c < 128) {
+                sb.byte(b, c)
+                i++
+            } else if (c >= 161 && c <= 223) {
+                tx.utf8(b, 65377 + c - 161)
+                i++
+            } else if (((c >= 129 && c <= 159) || (c >= 224 && c <= 252)) && i + 1 < n && bx.gb(p, i + 1) >= 64 && bx.gb(p, i + 1) <= 252) {
+                forge lead = c - 129
+                if (c > 159) { lead = c - 224 + 31 }
+                forge idx = (lead * 189 + bx.gb(p, i + 1) - 64) * 2
+                forge cp = bx.u16(_sjis, idx)
+                if (sp && cp == 12288) { sb.byte(b, 32) } else { tx.utf8(b, cp) }
+                i = i + 2
+            } else {
+                tx.utf8(b, 65533)
+                i++
+            }
+        }
+    }
+
+    vein sjis(p: stone, n: stone) -> obsidian {
+        forge b = sb.new()
+        sjis_into(b, p, n, false)
+        forge s = sb.str(b)
+        sb.drop(b)
+        return s
+    }
+
+    // ── pacotes ──────────────────────────────────────────────────────────
+    forge pk_path: Array<obsidian> = []
+    forge pk_start: Array<stone> = []
+    forge pk_count: Array<stone> = []
+    forge pk_map: Array<stone> = []
+    forge e_name: Array<obsidian> = []
+    forge e_off: Array<stone> = []
+    forge e_size: Array<stone> = []
+    forge e_flag: Array<stone> = []
+
+    vein _hash(s: obsidian) -> stone {
+        forge h = -3750763034362895579
+        forge n = tx.len(s)
+        forge i = 0
+        while (i < n) {
+            h = h ^ tx.at(s, i)
+            h = h * 1099511628211
+            i++
+        }
+        return h
+    }
+
+    // Abre <p>.lst. Devolve o id do pacote ou -1.
+    vein pack_open(p: obsidian) -> stone {
+        forge lst = bx.read_file(p + ".lst")
+        forge ln = bx.last_len
+        if (lst == 0 || ln < 4) { return -1 }
+        if (!bx.exists(p)) { return -1 }
+        forge count = bx.u32(lst, 0) ^ 3435973836
+        forge id = ofs_array_len(pk_path)
+        forge m = hashmap.new(count + 1)
+        forge start = ofs_array_len(e_name)
+        forge nb = bx.alloc(40)
+        forge i = 0
+        while (i < count && 4 + i * 44 + 44 <= ln) {
+            forge o = 4 + i * 44
+            forge j = 0
+            while (j < 32) {
+                forge x = bx.gb(lst, o + 8 + j)
+                if (x == 0) { break }
+                bx.pb(nb, j, x ^ 204)
+                j++
+            }
+            forge name = tx.upper(sjis(nb, j))
+            forge hv = _hash(name)
+            if (!hashmap.has(m, hv)) {
+                hashmap.set(m, hv, ofs_array_len(e_name))
+                ofs_array_push(e_name, name)
+                ofs_array_push(e_off, bx.u32(lst, o) ^ 3435973836)
+                ofs_array_push(e_size, bx.u32(lst, o + 4) ^ 3435973836)
+                ofs_array_push(e_flag, bx.gb(lst, o + 40))
+            }
+            i++
+        }
+        bx.free(nb)
+        bx.free(lst)
+        ofs_array_push(pk_path, p)
+        ofs_array_push(pk_start, start)
+        ofs_array_push(pk_count, ofs_array_len(e_name) - start)
+        ofs_array_push(pk_map, m)
+        return id
+    }
+
+    vein pack_size(pk: stone) -> stone { return ofs_array_get(pk_count, pk) }
+    vein pack_name(pk: stone, i: stone) -> obsidian { return ofs_array_get(e_name, ofs_array_get(pk_start, pk) + i) }
+
+    vein _entry(pk: stone, name: obsidian) -> stone {
+        forge up = tx.upper(name)
+        forge e = hashmap.get(ofs_array_get(pk_map, pk), _hash(up), -1)
+        if (e < 0) { return -1 }
+        forge en: obsidian = ofs_array_get(e_name, e)
+        if (!tx.eq(en, up)) { return -1 }
+        return e
+    }
+
+    vein pack_has(pk: stone, name: obsidian) -> bool { return _entry(pk, name) >= 0 }
+
+    // Le a entrada (ja sem o XOR 0xAA). Devolve 0 se nao existe; tamanho em bx.last_len.
+    vein pack_read(pk: stone, name: obsidian) -> stone {
+        forge e = _entry(pk, name)
+        if (e < 0) {
+            bx.last_len = 0
+            return 0
+        }
+        forge n: stone = ofs_array_get(e_size, e)
+        forge buf = bx.read_at(ofs_array_get(pk_path, pk), ofs_array_get(e_off, e), n)
+        forge got = bx.last_len
+        if (ofs_array_get(e_flag, e) == 0) {
+            // XOR 0xAA, 8 bytes por vez
+            forge q = 0
+            while (q + 8 <= got) {
+                forge wp: *stone = (buf + q) as *stone
+                fracture { *wp = *wp ^ -6148914691236517206; }
+                q = q + 8
+            }
+            while (q < got) {
+                bx.pb(buf, q, bx.gb(buf, q) ^ 170)
+                q++
+            }
+        }
+        bx.last_len = got
+        return buf
+    }
+
+    // ── TGF ──────────────────────────────────────────────────────────────
+    // Espelha FUN_00421888; devolve os bytes do BMP (tamanho em bx.last_len).
+    vein decode_tgf(s: stone, n: stone) -> stone {
+        forge out_len = bx.u32(s, 0)
+        forge unit = bx.u32(s, 4)
+        forge d = bx.alloc(out_len + 8)
+        forge o = 0
+        forge i = 8
+        while (i < n) {
+            forge op = bx.gb(s, i)
+            if (op == 0 || op == 1) {
+                forge c = bx.gb(s, i + 1)
+                if (op == 1) { c = c * unit }
+                forge cc = c
+                if (i + 2 + cc > n) { cc = n - i - 2 }
+                if (o + cc > out_len) { cc = out_len - o }
+                if (cc > 0) { bx.copy(d + o, s + i + 2, cc) }
+                o = o + c
+                i = i + 2 + c
+            } else {
+                forge k = 0
+                while (k < op) {
+                    forge cu = unit
+                    if (o + cu > out_len) { cu = out_len - o }
+                    if (cu > 0) { bx.copy(d + o, s + i + 1, cu) }
+                    o = o + unit
+                    k++
+                }
+                i = i + 1 + unit
+            }
+        }
+        if (o != out_len) {
+            warnings++
+            _log("WARN TGF size mismatch " + tx.num(o) + " != " + tx.num(out_len))
+        }
+        bx.last_len = out_len
+        return d
+    }
+
+    // ── BMP -> RGBA (1/4/8 bits com paleta, 16/24/32 bits) ─────────────
+    vein load_bmp(b: stone, n: stone) -> stone {
+        if (n < 54 || bx.gb(b, 0) != 66 || bx.gb(b, 1) != 77) { return -1 }
+        forge off = bx.u32(b, 10)
+        forge hs = bx.u32(b, 14)
+        forge w = bx.i32(b, 18)
+        forge hh = bx.i32(b, 22)
+        forge bpp = bx.u16(b, 28)
+        forge comp = bx.u32(b, 30)
+        if (comp != 0 && comp != 3) { return -1 }
+        forge topdown = hh < 0
+        forge h = hh
+        if (topdown) { h = 0 - hh }
+        if (w <= 0 || h <= 0 || w > 8192 || h > 8192) { return -1 }
+        forge pal = 14 + hs
+        forge stride = ((w * bpp + 31) / 32) * 4
+        if (off + stride * (h - 1) + (w * bpp + 7) / 8 > n) { return -1 }
+        forge id = img.new(w, h)
+        forge px = img.px(id)
+        forge y = 0
+        while (y < h) {
+            forge sy = h - 1 - y
+            if (topdown) { sy = y }
+            forge row = off + sy * stride
+            forge x = 0
+            forge o = y * w * 4
+            while (x < w) {
+                forge r = 0
+                forge g = 0
+                forge bl = 0
+                if (bpp == 24) {
+                    forge q = row + x * 3
+                    bl = bx.gb(b, q)
+                    g = bx.gb(b, q + 1)
+                    r = bx.gb(b, q + 2)
+                } else if (bpp == 32) {
+                    forge q2 = row + x * 4
+                    bl = bx.gb(b, q2)
+                    g = bx.gb(b, q2 + 1)
+                    r = bx.gb(b, q2 + 2)
+                } else if (bpp == 16) {
+                    forge v = bx.u16(b, row + x * 2)
+                    r = ((v >> 10) & 31) * 255 / 31
+                    g = ((v >> 5) & 31) * 255 / 31
+                    bl = (v & 31) * 255 / 31
+                } else {
+                    forge bits = x * bpp
+                    forge byte = bx.gb(b, row + bits / 8)
+                    forge ix = (byte >> (8 - bpp - (bits % 8))) & ((1 << bpp) - 1)
+                    forge pq = pal + ix * 4
+                    bl = bx.gb(b, pq)
+                    g = bx.gb(b, pq + 1)
+                    r = bx.gb(b, pq + 2)
+                }
+                bx.pb(px, o, r)
+                bx.pb(px, o + 1, g)
+                bx.pb(px, o + 2, bl)
+                bx.pb(px, o + 3, 255)
+                o = o + 4
+                x++
+            }
+            y++
+        }
+        return id
+    }
+
+    // Como FUN_00415f80: <nome>.TGF primeiro, depois <nome>.BMP. -1 se falhar.
+    vein load_image(pk: stone, name: obsidian) -> stone {
+        forge raw = pack_read(pk, name + ".TGF")
+        forge rn = bx.last_len
+        forge bmp = 0
+        forge bn = 0
+        if (raw != 0 && rn > 0) {
+            bmp = decode_tgf(raw, rn)
+            bn = bx.last_len
+            bx.free(raw)
+        } else {
+            bmp = pack_read(pk, name + ".BMP")
+            bn = bx.last_len
+        }
+        if (bmp == 0 || bn == 0) { return -1 }
+        forge id = load_bmp(bmp, bn)
+        bx.free(bmp)
+        return id
+    }
+
+    // Alfa = luminancia da mascara (invertida se o canto da mascara for claro).
+    // Resultado em mm_img, mm_x/y/w/h, mm_inv (como o Array de merge_mask).
+    forge mm_img: stone = -1
+    forge mm_x: stone = 0
+    forge mm_y: stone = 0
+    forge mm_w: stone = 0
+    forge mm_h: stone = 0
+    forge mm_inv: bool = false
+
+    vein _lum(p: stone, o: stone) -> stone {
+        // Image.convert(FORMAT_L8) do Godot: media dos tres canais
+        return (bx.gb(p, o) + bx.gb(p, o + 1) + bx.gb(p, o + 2)) / 3
+    }
+
+    vein merge_mask(cg: stone, cm: stone) -> void {
+        forge w = img.w(cg)
+        forge h = img.h(cg)
+        mm_inv = false
+        if (img.w(cm) != w || img.h(cm) != h) {
+            mm_img = cg
+            mm_x = 0
+            mm_y = 0
+            mm_w = w
+            mm_h = h
+            return
+        }
+        forge px = img.px(cg)
+        forge m = img.px(cm)
+        mm_inv = _lum(m, 0) > 127
+        forge x0 = w
+        forge y0 = h
+        forge x1 = -1
+        forge y1 = -1
+        forge y = 0
+        while (y < h) {
+            forge rmin = -1
+            forge rmax = -1
+            forge x = 0
+            while (x < w) {
+                forge o = (y * w + x) * 4
+                forge a = _lum(m, o)
+                if (mm_inv) { a = 255 - a }
+                bx.pb(px, o + 3, a)
+                if (a > 0) {
+                    if (rmin < 0) { rmin = x }
+                    rmax = x
+                }
+                x++
+            }
+            if (rmin >= 0) {
+                if (rmin < x0) { x0 = rmin }
+                if (rmax > x1) { x1 = rmax }
+                if (y < y0) { y0 = y }
+                y1 = y
+            }
+            y++
+        }
+        if (x1 < 0) {
+            mm_img = cg
+            mm_x = 0
+            mm_y = 0
+            mm_w = 1
+            mm_h = 1
+            return
+        }
+        mm_x = x0
+        mm_y = y0
+        mm_w = x1 - x0 + 1
+        mm_h = y1 - y0 + 1
+        mm_img = img.crop(cg, mm_x, mm_y, mm_w, mm_h)
+    }
+
+    // ── texto do SNX ─────────────────────────────────────────────────────
+    vein _is_lead(x: stone) -> bool {
+        return (x >= 129 && x <= 159) || x >= 224
+    }
+
+    vein _str_end(d: stone, p: stone) -> stone {
+        while (bx.gb(d, p) != 0) {
+            forge x = bx.gb(d, p)
+            if ((x >= 3 && x <= 4) || _is_lead(x)) { p++ }
+            p++
+        }
+        return p
+    }
+
+    // Remove codigos de controle (03/04 xx), 01 vira espaco; SJIS -> UTF-8;
+    // U+3000 -> espaco; colapsa espacos; strip.
+    vein clean_text(raw: stone, n: stone) -> obsidian {
+        forge buf = bx.alloc(n + 2)
+        forge bl = 0
+        forge i = 0
+        while (i < n) {
+            forge x = bx.gb(raw, i)
+            if (x == 3 || x == 4) {
+                i = i + 2
+            } else if (_is_lead(x)) {
+                bx.pb(buf, bl, x)
+                bl++
+                if (i + 1 < n) {
+                    bx.pb(buf, bl, bx.gb(raw, i + 1))
+                    bl++
+                }
+                i = i + 2
+            } else {
+                if (x == 1) {
+                    bx.pb(buf, bl, 32)
+                    bl++
+                } else if (x >= 32) {
+                    bx.pb(buf, bl, x)
+                    bl++
+                }
+                i++
+            }
+        }
+        forge u = sb.new()
+        sjis_into(u, buf, bl, true)
+        bx.free(buf)
+        // colapsa " {2,}" -> " "
+        forge up = sb.ptr(u)
+        forge un = sb.len(u)
+        forge o = sb.new()
+        forge k = 0
+        while (k < un) {
+            forge c = bx.gb(up, k)
+            sb.byte(o, c)
+            if (c == 32) {
+                while (k + 1 < un && bx.gb(up, k + 1) == 32) { k++ }
+            }
+            k++
+        }
+        forge s = sb.str(o)
+        sb.drop(o)
+        sb.drop(u)
+        return tx.strip(s)
+    }
+
+    // Separa falante e fala. Resultado em sp_name / sp_text.
+    forge sp_name: obsidian = ""
+    forge sp_text: obsidian = ""
+
+    vein _has_bracket(s: obsidian, a: stone, b: stone, open: bool, close: bool) -> bool {
+        // procura 「 (E3 80 8C) / 」 (E3 80 8D) entre os bytes [a, b)
+        forge i = a
+        while (i + 2 < b + 0 && i + 2 < tx.len(s)) {
+            if (tx.at(s, i) == 227 && tx.at(s, i + 1) == 128) {
+                forge t = tx.at(s, i + 2)
+                if (open && t == 140 && i + 3 <= b) { return true }
+                if (close && t == 141 && i + 3 <= b) { return true }
+            }
+            i++
+        }
+        return false
+    }
+
+    vein split_speaker(t: obsidian) -> void {
+        forge n = tx.len(t)
+        // ^([^:"「」]{1,24}):\s*"?(.*?)"?$
+        forge c = tx.find(t, 58, 0)
+        if (c > 0) {
+            forge cps = tx.cp_count(t, 0, c)
+            forge q = tx.find(t, 34, 0)
+            if (cps >= 1 && cps <= 24 && (q < 0 || q > c) && !_has_bracket(t, 0, c, true, true)) {
+                forge p = c + 1
+                while (p < n && (tx.at(t, p) == 32 || (tx.at(t, p) >= 9 && tx.at(t, p) <= 13))) { p++ }
+                if (p < n && tx.at(t, p) == 34) { p++ }
+                forge e = n
+                if (e > p && tx.at(t, e - 1) == 34) { e-- }
+                sp_name = tx.strip(tx.sub(t, 0, c))
+                sp_text = tx.strip(tx.sub(t, p, e - p))
+                return
+            }
+        }
+        // ^([^「」]{1,12})「(.*)」$
+        forge o = -1
+        forge i = 0
+        while (i + 2 < n) {
+            if (tx.at(t, i) == 227 && tx.at(t, i + 1) == 128 && tx.at(t, i + 2) == 140) {
+                o = i
+                break
+            }
+            i++
+        }
+        if (o > 0 && n >= 3 && tx.at(t, n - 3) == 227 && tx.at(t, n - 2) == 128 && tx.at(t, n - 1) == 141 && n - 3 >= o + 3) {
+            forge cps2 = tx.cp_count(t, 0, o)
+            if (cps2 >= 1 && cps2 <= 12 && !_has_bracket(t, 0, o, false, true)) {
+                sp_name = tx.strip(tx.sub(t, 0, o))
+                sp_text = tx.strip(tx.sub(t, o + 3, n - 3 - (o + 3)))
+                return
+            }
+        }
+        sp_name = ""
+        sp_text = t
+    }
+
+    // ── SNX ──────────────────────────────────────────────────────────────
+    forge _fmt: Array<obsidian> = []
+    forge _eops: Array<obsidian> = []
+
+    vein _init_tables() -> void {
+        if (ofs_array_len(_fmt) > 0) { return }
+        forge i = 0
+        while (i < 256) {
+            ofs_array_push(_fmt, "?")
+            ofs_array_push(_eops, "")
+            i++
+        }
+        ofs_array_set(_fmt, 16, "u16")
+        ofs_array_set(_fmt, 17, "expr u16")
+        ofs_array_set(_fmt, 18, "u16")
+        ofs_array_set(_fmt, 19, "u16")
+        ofs_array_set(_fmt, 20, "u16")
+        ofs_array_set(_fmt, 21, "str")
+        ofs_array_set(_fmt, 22, "")
+        ofs_array_set(_fmt, 23, "u16 strlist")
+        ofs_array_set(_fmt, 24, "str")
+        ofs_array_set(_fmt, 25, "str")
+        ofs_array_set(_fmt, 26, "")
+        ofs_array_set(_fmt, 27, "u16 u16")
+        ofs_array_set(_fmt, 28, "u16 u16")
+        ofs_array_set(_fmt, 31, "u16 u16")
+        ofs_array_set(_fmt, 32, "str")
+        ofs_array_set(_fmt, 33, "str")
+        ofs_array_set(_fmt, 34, "str")
+        ofs_array_set(_fmt, 35, "str")
+        ofs_array_set(_fmt, 36, "u8")
+        ofs_array_set(_fmt, 37, "u8")
+        ofs_array_set(_fmt, 38, "u8")
+        ofs_array_set(_fmt, 39, "u16")
+        ofs_array_set(_fmt, 40, "u16")
+        ofs_array_set(_fmt, 41, "u8 u8")
+        ofs_array_set(_fmt, 42, "")
+        ofs_array_set(_fmt, 43, "u8 str u8")
+        ofs_array_set(_fmt, 44, "u8")
+        ofs_array_set(_fmt, 45, "str u8")
+        ofs_array_set(_fmt, 46, "u8 str str str btnlist")
+        ofs_array_set(_fmt, 47, "str u16 u16 u16 u16 u16 u16")
+        ofs_array_set(_fmt, 48, "u8")
+        ofs_array_set(_fmt, 49, "u8")
+        ofs_array_set(_fmt, 50, "u8")
+        ofs_array_set(_fmt, 51, "u8")
+        ofs_array_set(_fmt, 52, "u8")
+        ofs_array_set(_fmt, 53, "u16 u16")
+        ofs_array_set(_fmt, 54, "u16")
+        ofs_array_set(_fmt, 55, "u8 u8 u8 u8 u8 u8")
+        ofs_array_set(_fmt, 56, "u8 u8 u8 u8 u8 u8")
+        ofs_array_set(_fmt, 57, "u8")
+        ofs_array_set(_fmt, 58, "u16 u16 u16 u16")
+        ofs_array_set(_fmt, 59, "u8 u8")
+        ofs_array_set(_fmt, 60, "u8 u8")
+        ofs_array_set(_fmt, 61, "u8 str")
+        ofs_array_set(_fmt, 62, "u8 str")
+        ofs_array_set(_fmt, 63, "u8 u8")
+        ofs_array_set(_fmt, 64, "str")
+        ofs_array_set(_fmt, 65, "u16")
+        ofs_array_set(_fmt, 66, "u16 u16 u16 u16 u16 u16 u16 u16")
+        ofs_array_set(_fmt, 67, "u16")
+        ofs_array_set(_fmt, 68, "")
+        ofs_array_set(_fmt, 69, "")
+        ofs_array_set(_fmt, 70, "")
+        ofs_array_set(_fmt, 71, "")
+        ofs_array_set(_fmt, 72, "u8")
+        ofs_array_set(_fmt, 73, "u8")
+        ofs_array_set(_fmt, 74, "")
+        ofs_array_set(_fmt, 75, "str str str")
+        ofs_array_set(_fmt, 76, "str u16 u8 u8")
+        ofs_array_set(_fmt, 77, "u16 u16 u16 u16")
+        ofs_array_set(_fmt, 78, "str u8")
+        ofs_array_set(_fmt, 79, "")
+        ofs_array_set(_fmt, 80, "str")
+        ofs_array_set(_fmt, 81, "u8")
+        ofs_array_set(_fmt, 82, "u16 u16")
+        ofs_array_set(_fmt, 83, "str")
+        ofs_array_set(_fmt, 84, "u8")
+        ofs_array_set(_fmt, 85, "u16 u16")
+        ofs_array_set(_fmt, 86, "u8 u16 u16")
+        ofs_array_set(_fmt, 87, "")
+        ofs_array_set(_fmt, 255, "")
+        // RPN (FUN_00404acc); 8/9/12/13 sao soma/sub/mul/div saturadas em 16 bits.
+        ofs_array_set(_eops, 2, "==")
+        ofs_array_set(_eops, 3, "<")
+        ofs_array_set(_eops, 4, ">")
+        ofs_array_set(_eops, 5, "<=")
+        ofs_array_set(_eops, 6, ">=")
+        ofs_array_set(_eops, 7, "!=")
+        ofs_array_set(_eops, 8, "+")
+        ofs_array_set(_eops, 9, "-")
+        ofs_array_set(_eops, 10, "|")
+        ofs_array_set(_eops, 11, "^")
+        ofs_array_set(_eops, 12, "*")
+        ofs_array_set(_eops, 13, "/")
+        ofs_array_set(_eops, 14, "%")
+        ofs_array_set(_eops, 15, "&")
+        ofs_array_set(_eops, 16, "<<")
+        ofs_array_set(_eops, 17, ">>")
+        ofs_array_set(_eops, 18, "abs")
+        ofs_array_set(_eops, 19, "neg")
+        ofs_array_set(_eops, 20, "not")
+    }
+
+    forge _rp: stone = 0
+
+    // Le expressao RPN em p; devolve array JSON; posicao final em _rp.
+    vein _read_expr(d: stone, p: stone) -> stone {
+        forge tok = json.arr()
+        while (bx.gb(d, p) != 0) {
+            forge c = bx.gb(d, p)
+            p++
+            if (c == 21) {
+                json.push(tok, json.int(bx.u16(d, p)))
+                p = p + 2
+            } else if (c == 22) {
+                json.push(tok, json.str("var[" + tx.num(bx.u16(d, p)) + "]"))
+                p = p + 2
+            } else if (c == 23) {
+                json.push(tok, json.str("flag[" + tx.num(bx.u16(d, p)) + "]"))
+                p = p + 2
+            } else {
+                forge nm: obsidian = ofs_array_get(_eops, c)
+                if (tx.len(nm) == 0) { nm = "op" + tx.hex2(c) }
+                json.push(tok, json.str(nm))
+            }
+        }
+        _rp = p + 1
+        return tok
+    }
+
+    vein _clean_arg(d: stone, a: stone, b: stone) -> obsidian {
+        return clean_text(d + a, b - a)
+    }
+
+    // Converte bytecode SNX numa lista de instrucoes (array JSON); cada uma leva "addr".
+    vein convert_snx(d: stone, n: stone) -> stone {
+        _init_tables()
+        forge out = json.arr()
+        forge p = 0
+        while (p < n) {
+            forge at = p
+            forge op = bx.gb(d, p)
+            p++
+            if (op < 16) {
+                forge dst = bx.u16(d, p)
+                p = p + 2
+                forge sk = op % 4
+                forge src = -1
+                forge skn = "imm"
+                if (sk == 0) {
+                    src = json.int(bx.u16(d, p))
+                    p = p + 2
+                } else if (sk == 1) {
+                    skn = "var"
+                    src = json.str("var[" + tx.num(bx.u16(d, p)) + "]")
+                    p = p + 2
+                } else if (sk == 2) {
+                    skn = "flag"
+                    src = json.str("flag[" + tx.num(bx.u16(d, p)) + "]")
+                    p = p + 2
+                } else {
+                    skn = "expr"
+                    src = _read_expr(d, p)
+                    p = _rp
+                }
+                forge kinds = ["set_var", "set_flag", "add_var", "sub_var"]
+                forge si = json.obj()
+                json.put_i(si, "addr", at)
+                json.put_s(si, "op", kinds[op / 4])
+                json.put_i(si, "dst", dst)
+                json.put_s(si, "src_kind", skn)
+                json.put(si, "src", src)
+                json.push(out, si)
+                continue
+            }
+            forge f: obsidian = ofs_array_get(_fmt, op)
+            if (tx.eq(f, "?")) {
+                warnings++
+                _log("ERRO opcode SNX desconhecido 0x" + tx.hex2(op) + " em 0x" + tx.hex2(at))
+                break
+            }
+            // argumentos: numeros em an[], strings como (ini, fim) em sa[]/se[]; listas como json
+            forge a = json.arr()
+            forge sa: Array<stone> = []
+            forge se: Array<stone> = []
+            forge fl = tx.len(f)
+            forge fi = 0
+            while (fi < fl) {
+                forge fe = tx.find(f, 32, fi)
+                if (fe < 0) { fe = fl }
+                forge fld = tx.sub(f, fi, fe - fi)
+                fi = fe + 1
+                if (tx.eq(fld, "u8")) {
+                    json.push(a, json.int(bx.gb(d, p)))
+                    p++
+                } else if (tx.eq(fld, "u16")) {
+                    json.push(a, json.int(bx.u16(d, p)))
+                    p = p + 2
+                } else if (tx.eq(fld, "str")) {
+                    forge e = _str_end(d, p)
+                    // marcador: string crua guardada como faixa de bytes
+                    forge mk = json.int(ofs_array_len(sa))
+                    json.push(a, mk)
+                    ofs_array_push(sa, p)
+                    ofs_array_push(se, e)
+                    json.set_int(mk, 0 - 1 - (ofs_array_len(sa) - 1))
+                    p = e + 1
+                } else if (tx.eq(fld, "expr")) {
+                    json.push(a, _read_expr(d, p))
+                    p = _rp
+                } else if (tx.eq(fld, "strlist")) {
+                    forge items = json.arr()
+                    while (bx.gb(d, p) != 0) {
+                        forge e2 = _str_end(d, p)
+                        json.push(items, json.str(clean_text(d + p, e2 - p)))
+                        p = e2 + 1
+                    }
+                    p++
+                    json.push(a, items)
+                } else if (tx.eq(fld, "btnlist")) {
+                    forge btn = json.arr()
+                    while (bx.gb(d, p) != 0) {
+                        forge one = json.arr()
+                        json.push(one, json.int(bx.u16(d, p)))
+                        json.push(one, json.int(bx.u16(d, p + 2)))
+                        json.push(one, json.int(bx.u16(d, p + 4)))
+                        json.push(one, json.int(bx.u16(d, p + 6)))
+                        json.push(one, json.int(bx.gb(d, p + 8)))
+                        json.push(btn, one)
+                        p = p + 9
+                    }
+                    p++
+                    json.push(a, btn)
+                }
+            }
+            forge av = json.items(a)
+            forge ins = json.obj()
+            json.put_i(ins, "addr", at)
+            if (op == 64) {
+                json.put_s(ins, "op", "chapter")
+                json.put_s(ins, "title", _sarg(d, av, sa, se, 0))
+            } else if (op == 32) {
+                json.put_s(ins, "op", "bg")
+                json.put_s(ins, "file", _sarg(d, av, sa, se, 0))
+            } else if (op >= 33 && op <= 35) {
+                json.put_s(ins, "op", "char")
+                json.put_i(ins, "slot", op - 33)
+                json.put_s(ins, "file", _sarg(d, av, sa, se, 0))
+            } else if (op == 36) {
+                json.put_s(ins, "op", "layer_mode")
+                json.put(ins, "mode", ofs_array_get(av, 0))
+            } else if (op == 37) {
+                json.put_s(ins, "op", "transition")
+                json.put(ins, "effect", ofs_array_get(av, 0))
+            } else if (op == 38) {
+                json.put_s(ins, "op", "blit")
+                json.put(ins, "mode", ofs_array_get(av, 0))
+            } else if (op == 39) {
+                json.put_s(ins, "op", "wait_sync")
+                json.put_i(ins, "ms", json.ival(ofs_array_get(av, 0)) * 100)
+            } else if (op == 40) {
+                json.put_s(ins, "op", "wait")
+                json.put_i(ins, "ms", json.ival(ofs_array_get(av, 0)) * 100)
+            } else if (op == 43) {
+                json.put_s(ins, "op", "audio")
+                json.put(ins, "channel", ofs_array_get(av, 0))
+                json.put_s(ins, "file", tx.lower(_sarg(d, av, sa, se, 1)))
+                json.put(ins, "loop", ofs_array_get(av, 2))
+            } else if (op == 44) {
+                json.put_s(ins, "op", "stop_audio")
+                json.put(ins, "channel", ofs_array_get(av, 0))
+            } else if (op == 21) {
+                split_speaker(_sarg(d, av, sa, se, 0))
+                json.put_s(ins, "op", "say")
+                json.put_s(ins, "speaker", sp_name)
+                json.put_s(ins, "text", sp_text)
+            } else if (op == 22) {
+                json.put_s(ins, "op", "wait_click")
+            } else if (op == 23) {
+                json.put_s(ins, "op", "choice")
+                json.put(ins, "var", ofs_array_get(av, 0))
+                json.put(ins, "options", ofs_array_get(av, 1))
+            } else if (op == 24) {
+                json.put_s(ins, "op", "jump")
+                json.put_s(ins, "target", tx.upper(_sarg(d, av, sa, se, 0)))
+            } else if (op == 25) {
+                json.put_s(ins, "op", "call")
+                json.put_s(ins, "target", tx.upper(_sarg(d, av, sa, se, 0)))
+            } else if (op == 26) {
+                json.put_s(ins, "op", "return")
+            } else if (op == 16) {
+                json.put_s(ins, "op", "goto")
+                json.put(ins, "to", ofs_array_get(av, 0))
+            } else if (op == 17) {
+                json.put_s(ins, "op", "if_not_goto")
+                json.put(ins, "cond", ofs_array_get(av, 0))
+                json.put(ins, "to", ofs_array_get(av, 1))
+            } else if (op == 18) {
+                json.put_s(ins, "op", "flag_on")
+                json.put(ins, "flag", ofs_array_get(av, 0))
+            } else if (op == 19) {
+                json.put_s(ins, "op", "flag_off")
+                json.put(ins, "flag", ofs_array_get(av, 0))
+            } else if (op == 20) {
+                json.put_s(ins, "op", "flag_toggle")
+                json.put(ins, "flag", ofs_array_get(av, 0))
+            } else if (op == 27) {
+                json.put_s(ins, "op", "if_flag_off_goto")
+                json.put(ins, "flag", ofs_array_get(av, 0))
+                json.put(ins, "to", ofs_array_get(av, 1))
+            } else if (op == 28) {
+                json.put_s(ins, "op", "if_flag_on_goto")
+                json.put(ins, "flag", ofs_array_get(av, 0))
+                json.put(ins, "to", ofs_array_get(av, 1))
+            } else if (op == 31) {
+                json.put_s(ins, "op", "random")
+                json.put(ins, "mod", ofs_array_get(av, 0))
+                json.put(ins, "dst", ofs_array_get(av, 1))
+            } else if (op == 46) {
+                json.put_s(ins, "op", "menu")
+                json.put(ins, "var", ofs_array_get(av, 0))
+                json.put_s(ins, "normal", _sarg(d, av, sa, se, 1))
+                json.put_s(ins, "hover", _sarg(d, av, sa, se, 2))
+                json.put_s(ins, "base", _sarg(d, av, sa, se, 3))
+                json.put(ins, "buttons", ofs_array_get(av, 4))
+            } else if (op == 69) {
+                json.put_s(ins, "op", "load_menu")
+            } else if (op == 78) {
+                json.put_s(ins, "op", "video")
+                json.put_s(ins, "file", tx.lower(_sarg(d, av, sa, se, 0)))
+                json.put(ins, "mode", ofs_array_get(av, 1))
+            } else if (op == 79) {
+                json.put_s(ins, "op", "video_end")
+            } else if (op == 255) {
+                json.put_s(ins, "op", "end")
+            } else {
+                json.put_s(ins, "op", "op_" + tx.hex2(op))
+                forge args = json.arr()
+                forge k = 0
+                while (k < ofs_array_len(av)) {
+                    forge v: stone = ofs_array_get(av, k)
+                    if (json.kind(v) == json.K_INT && json.ival(v) < 0) {
+                        json.push(args, json.str(_sarg(d, av, sa, se, k)))
+                    } else {
+                        json.push(args, v)
+                    }
+                    k++
+                }
+                json.put(ins, "args", args)
+            }
+            json.push(out, ins)
+            if (op == 255) { break }
+        }
+        return out
+    }
+
+    // Argumento k que e string crua (marcador inteiro negativo -1-i) -> texto limpo.
+    vein _sarg(d: stone, av: Array<stone>, sa: Array<stone>, se: Array<stone>, k: stone) -> obsidian {
+        forge v: stone = ofs_array_get(av, k)
+        forge mi = 0 - 1 - json.ival(v)
+        forge a: stone = ofs_array_get(sa, mi)
+        forge e: stone = ofs_array_get(se, mi)
+        return clean_text(d + a, e - a)
+    }
+
+    // Mesmo layout de instructions_to_json do Godot.
+    vein instructions_to_json(b: stone, script_name: obsidian, ins: stone) -> void {
+        sb.add(b, "{\n  \"script\": ")
+        json._esc(b, script_name)
+        sb.add(b, ",\n  \"instructions\": [\n")
+        forge c = json.first(ins)
+        forge firstc = true
+        while (c >= 0) {
+            if (!firstc) { sb.add(b, ",\n") }
+            firstc = false
+            sb.add(b, "    ")
+            json.write(b, c, "", 0)
+            c = json.next(c)
+        }
+        sb.add(b, "\n  ]\n}\n")
+    }
+
+    // Converte o SNX <name> do pacote; devolve o array JSON (ou -1).
+    vein script_from_pack(pk: stone, name: obsidian) -> stone {
+        forge d = pack_read(pk, name)
+        forge n = bx.last_len
+        if (d == 0) { return -1 }
+        forge out = convert_snx(d, n)
+        bx.free(d)
+        return out
+    }
+
+    // ── pipeline de importacao ───────────────────────────────────────────
+    vein _progress(stage: obsidian, done: stone, total: stone) -> void {
+        if (total <= 0) { return }
+        forge step = total / 10
+        if (step < 1) { step = 1 }
+        if (done % step == 0 || done == total) {
+            _log("  " + stage + " " + tx.num(done) + "/" + tx.num(total))
+        }
+    }
+
+    // Nomes .SNX do pacote (ordem do indice).
+    vein script_names(pk: stone) -> Array<obsidian> {
+        forge names: Array<obsidian> = []
+        forge i = 0
+        while (i < pack_size(pk)) {
+            forge nm = pack_name(pk, i)
+            if (tx.ends(nm, ".SNX")) { ofs_array_push(names, nm) }
+            i++
+        }
+        return names
+    }
+
+    // Converte um script para <out_dir>/<NOME>.json (passo da importacao).
+    vein convert_script_one(pk: stone, out_dir: obsidian, n2: obsidian) -> bool {
+        forge m = json.mark()
+        forge ins = script_from_pack(pk, n2)
+        forge ok = false
+        if (ins >= 0) {
+            forge b = sb.new()
+            instructions_to_json(b, n2, ins)
+            sb.write(b, out_dir + "/" + tx.basename(n2) + ".json")
+            sb.drop(b)
+            ok = true
+        }
+        json.release(m)
+        return ok
+    }
+
+    vein convert_scripts(pk: stone, out_dir: obsidian, stage: obsidian) -> stone {
+        bx.mkdir_p(out_dir)
+        forge names = script_names(pk)
+        forge total = ofs_array_len(names)
+        forge done = 0
+        forge i = 0
+        while (i < total) {
+            forge n2: obsidian = ofs_array_get(names, i)
+            if (convert_script_one(pk, out_dir, n2)) { done++ }
+            _progress(stage, done, total)
+            i++
+        }
+        return done
+    }
+
+    vein _sprite_entry(man: stone, key: obsidian, x: stone, y: stone, w: stone, h: stone, mask: bool, inv: bool, with_inv: bool) -> void {
+        forge e = json.obj()
+        json.put_s(e, "kind", "sprite")
+        json.put_i(e, "x", x)
+        json.put_i(e, "y", y)
+        json.put_i(e, "w", w)
+        json.put_i(e, "h", h)
+        json.put(e, "mask", json.boolv(mask))
+        if (with_inv) { json.put(e, "mask_inverted", json.boolv(inv)) }
+        json.put(man, key, e)
+    }
+
+    // Nomes-base das imagens (TGF/BMP) em ordem alfabetica.
+    vein image_bases(pk: stone) -> Array<obsidian> {
+        forge bases: Array<obsidian> = []
+        forge seen = hashmap.new(1024)
+        forge i = 0
+        while (i < pack_size(pk)) {
+            forge nm = pack_name(pk, i)
+            forge ext = tx.extension(nm)
+            if (tx.eq(ext, "TGF") || tx.eq(ext, "BMP")) {
+                forge b0 = tx.basename(nm)
+                forge hv = _hash(b0)
+                if (!hashmap.has(seen, hv)) {
+                    hashmap.set(seen, hv, 1)
+                    ofs_array_push(bases, b0)
+                }
+            }
+            i++
+        }
+        return tx.sort(bases)
+    }
+
+    // Converte uma imagem-base para PNG e registra no manifesto (passo).
+    vein convert_image_one(pk: stone, man: stone, img_dir: obsidian, spr_dir: obsidian, b: obsidian) -> void {
+        if (tx.starts(b, "CM_")) { return }
+        if (tx.starts(b, "CG_")) {
+            forge name = tx.sub(b, 3, tx.len(b) - 3)
+            forge cg = load_image(pk, b)
+            forge cm = load_image(pk, "CM_" + name)
+            if (cg < 0) {
+                warnings++
+                _log("WARN cannot decode " + b)
+                return
+            }
+            if (cm < 0) {
+                img.save_png(cg, spr_dir + "/" + name + ".png", true)
+                _sprite_entry(man, "sprites/" + name, 0, 0, img.w(cg), img.h(cg), false, false, false)
+                img.free(cg)
+                return
+            }
+            merge_mask(cg, cm)
+            img.save_png(mm_img, spr_dir + "/" + name + ".png", true)
+            _sprite_entry(man, "sprites/" + name, mm_x, mm_y, mm_w, mm_h, true, mm_inv, true)
+            if (mm_img != cg) { img.free(mm_img) }
+            img.free(cg)
+            img.free(cm)
+            return
+        }
+        forge im = load_image(pk, b)
+        if (im < 0) {
+            warnings++
+            _log("WARN cannot decode " + b)
+            return
+        }
+        // Imagem simples com mascara CM_ mas sem gemea CG_ tambem vira sprite.
+        if (pack_has(pk, "CM_" + b + ".TGF") || pack_has(pk, "CM_" + b + ".BMP")) {
+            if (!(pack_has(pk, "CG_" + b + ".TGF") || pack_has(pk, "CG_" + b + ".BMP"))) {
+                forge cm2 = load_image(pk, "CM_" + b)
+                if (cm2 >= 0) {
+                    forge dupi = img.crop(im, 0, 0, img.w(im), img.h(im))
+                    merge_mask(dupi, cm2)
+                    img.save_png(mm_img, spr_dir + "/" + b + ".png", true)
+                    _sprite_entry(man, "sprites/" + b, mm_x, mm_y, mm_w, mm_h, true, mm_inv, true)
+                    if (mm_img != dupi) { img.free(mm_img) }
+                    img.free(dupi)
+                    img.free(cm2)
+                }
+            }
+        }
+        img.save_png(im, img_dir + "/" + b + ".png", false)
+        forge e = json.obj()
+        json.put_s(e, "kind", "image")
+        json.put_i(e, "x", 0)
+        json.put_i(e, "y", 0)
+        json.put_i(e, "w", img.w(im))
+        json.put_i(e, "h", img.h(im))
+        json.put(man, b, e)
+        img.free(im)
+    }
+
+    vein convert_images(pk: stone, out_dir: obsidian) -> stone {
+        forge img_dir = out_dir + "/images"
+        forge spr_dir = img_dir + "/sprites"
+        bx.mkdir_p(spr_dir)
+        forge man = json.obj()
+        forge list = image_bases(pk)
+        forge total = ofs_array_len(list)
+        forge done = 0
+        forge i = 0
+        while (i < total) {
+            forge b: obsidian = ofs_array_get(list, i)
+            done++
+            _progress("images", done, total)
+            i++
+            convert_image_one(pk, man, img_dir, spr_dir, b)
+        }
+        json.save(img_dir + "/manifest.json", man, "  ")
+        return json.count(man)
+    }
+
+    vein extract_audio(pk: stone, out_dir: obsidian, stage: obsidian) -> stone {
+        bx.mkdir_p(out_dir)
+        forge total = pack_size(pk)
+        forge done = 0
+        forge i = 0
+        while (i < total) {
+            forge nm = pack_name(pk, i)
+            forge data = pack_read(pk, nm)
+            if (data != 0) {
+                bx.write_file(out_dir + "/" + tx.lower(nm), data, bx.last_len)
+                bx.free(data)
+            }
+            done++
+            if (done % 25 == 0 || done == total) { _log("  " + stage + " " + tx.num(done) + "/" + tx.num(total)) }
+            i++
+        }
+        return done
+    }
+
+    // game.json do jogo importado (igual ao do import_cli.gd).
+    vein write_meta(dst_dir: obsidian, src_dir: obsidian, stamp: obsidian) -> void {
+        forge meta = json.obj()
+        json.put_s(meta, "id", GAME_ID)
+        json.put_s(meta, "title", "MOON.")
+        json.put_s(meta, "driver", DRIVER_ID)
+        json.put_s(meta, "start_script", "INIT")
+        forge langs = json.obj()
+        json.put_s(langs, "en", "scripts")
+        json.put_s(langs, "ja", "scripts_jp")
+        json.put(meta, "languages", langs)
+        forge canvas = json.arr()
+        json.push(canvas, json.int(640))
+        json.push(canvas, json.int(480))
+        json.put(meta, "canvas", canvas)
+        forge aext = json.arr()
+        json.push(aext, json.str("ogg"))
+        json.push(aext, json.str("wav"))
+        json.put(meta, "audio_ext", aext)
+        json.put_s(meta, "image_ext", "png")
+        json.put_s(meta, "imported_at", stamp)
+        json.put_s(meta, "source", src_dir)
+        json.save(dst_dir + "/game.json", meta, "  ")
+    }
+
+    // Importacao completa. audio: "wav" | "skip". Devolve o relatorio (objeto JSON).
+    vein import_game(src_dir: obsidian, dst_dir: obsidian, scripts: bool, scripts_jp: bool, images: bool, audio: obsidian, stamp: obsidian) -> stone {
+        forge rep = json.obj()
+        json.put(rep, "ok", json.boolv(false))
+        json.put_s(rep, "dst", dst_dir)
+        bx.mkdir_p(dst_dir)
+        forge main = pack_open(src_dir + "/moon_eng")
+        if (main < 0) {
+            json.put_s(rep, "error", "moon_eng/moon_eng.lst not found in " + src_dir)
+            return rep
+        }
+        if (scripts) {
+            forge n = convert_scripts(main, dst_dir + "/scripts", "scripts")
+            json.put_i(rep, "scripts", n)
+            _log("scripts (en): " + tx.num(n))
+        }
+        if (scripts_jp) {
+            forge jp = pack_open(src_dir + "/moon_jp")
+            if (jp >= 0) {
+                forge nj = convert_scripts(jp, dst_dir + "/scripts_jp", "scripts_jp")
+                json.put_i(rep, "scripts_jp", nj)
+                _log("scripts (ja): " + tx.num(nj))
+            }
+        }
+        if (images) {
+            forge ni = convert_images(main, dst_dir)
+            json.put_i(rep, "images", ni)
+            _log("images: " + tx.num(ni))
+        }
+        if (tx.eq(audio, "wav")) {
+            forge total = 0
+            forge p0 = pack_open(src_dir + "/ps0")
+            if (p0 >= 0) { total = total + extract_audio(p0, dst_dir + "/audio", "audio_ps0") }
+            forge p1 = pack_open(src_dir + "/ps1")
+            if (p1 >= 0) { total = total + extract_audio(p1, dst_dir + "/audio", "audio_ps1") }
+            json.put_i(rep, "audio", total)
+            _log("audio files: " + tx.num(total))
+        }
+        write_meta(dst_dir, src_dir, stamp)
+        json.put(rep, "ok", json.boolv(true))
+        json.put_i(rep, "warnings", warnings)
+        return rep
+    }
+}

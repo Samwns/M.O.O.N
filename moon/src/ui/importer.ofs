@@ -1,0 +1,243 @@
+// M.O.O.N — importacao: procura pastas de jogo e converte o MOON. no
+// celular em passos (um script ou uma imagem por quadro), sem travar a tela.
+
+attach {F:lib.ofs}
+attach {F:../drivers/tactics_moon.ofs}
+
+extern vein time(t: *stone) -> stone
+extern vein localtime_r(t: *stone, tm: *stone) -> *stone
+
+namespace imp {
+    // candidatos (pastas encontradas)
+    forge c_dir: Array<obsidian> = []
+    forge c_engine: Array<obsidian> = []
+    forge c_name: Array<obsidian> = []
+    forge c_info: Array<obsidian> = []
+    forge roots: Array<obsidian> = []
+
+    // trabalho em andamento
+    forge busy: bool = false
+    forge stage: stone = 0         // 0 tamanho, 1 scripts, 2 imagens, 3 final
+    forge src: obsidian = ""
+    forge dst: obsidian = ""
+    forge pk: stone = -1
+    forge items: Array<obsidian> = []
+    forge pos: stone = 0
+    forge man: stone = -1
+    forge size: stone = 0
+    forge label: obsidian = ""
+    forge pct: stone = 0
+    forge result: stone = -1       // indice na biblioteca ao terminar
+    forge sjis_ok: bool = false
+    forge sjis_path: obsidian = ""
+    forge t0: stone = 0
+    forge script_dir: obsidian = "scripts"
+    forge jp_pk: stone = -1
+
+    vein two(v: stone) -> obsidian {
+        if (v < 10) { return "0" + tx.num(v) }
+        return tx.num(v)
+    }
+
+    vein stamp() -> obsidian {
+        forge tb = bx.alloc(16)
+        forge tm_b = bx.alloc(128)
+        time(tb as *stone)
+        localtime_r(tb as *stone, tm_b as *stone)
+        forge s = tx.num(bx.i32(tm_b, 20) + 1900) + "-" + two(bx.i32(tm_b, 16) + 1) + "-" + two(bx.i32(tm_b, 12))
+        s = s + "T" + two(bx.i32(tm_b, 8)) + ":" + two(bx.i32(tm_b, 4)) + ":" + two(bx.i32(tm_b, 0))
+        bx.free(tb)
+        bx.free(tm_b)
+        return s
+    }
+
+    vein now_s() -> stone {
+        forge tb = bx.alloc(16)
+        time(tb as *stone)
+        forge t = bx.u32(tb, 0)
+        bx.free(tb)
+        return t
+    }
+
+    // ── procura ──────────────────────────────────────────────────────────
+    vein scan() -> void {
+        c_dir = []
+        c_engine = []
+        c_name = []
+        c_info = []
+        forge r = 0
+        while (r < ofs_array_len(roots)) {
+            forge root: obsidian = ofs_array_get(roots, r)
+            forge subs = bx.list_dir(root, 2)
+            forge i = 0
+            while (i < ofs_array_len(subs)) {
+                forge sd: obsidian = ofs_array_get(subs, i)
+                if (!tx.starts(sd, ".")) { add_candidate(root + "/" + sd) }
+                i++
+            }
+            r++
+        }
+    }
+
+    vein add_candidate(dir: obsidian) -> void {
+        forge e = lib.detect(dir)
+        ofs_array_push(c_dir, dir)
+        ofs_array_push(c_engine, e)
+        ofs_array_push(c_name, lib.d_name)
+        forge info = lib.engine_label(e, lib.d_engver)
+        if (tx.len(lib.d_ver) > 0 && !tx.eq(e, "tactics_moon")) { info = info + " · v" + lib.d_ver }
+        if (tx.len(lib.d_company) > 0 && tx.eq(e, "unity")) { info = info + " · " + lib.d_company }
+        if (lib.find_src(dir) >= 0) { info = info + " · " + tr("imp_ja") }
+        ofs_array_push(c_info, info)
+    }
+
+    vein cands_count() -> stone { return ofs_array_len(c_dir) }
+    vein cands_nome(i: stone) -> obsidian { return ofs_array_get(c_name, i) }
+    vein cands_info(i: stone) -> obsidian { return ofs_array_get(c_info, i) + "\n" }
+    vein cands_sub(i: stone) -> obsidian { return ofs_array_get(c_info, i) }
+    vein cands_icone(i: stone) -> obsidian { return lib.engine_icon(ofs_array_get(c_engine, i)) }
+    vein cands_motor(i: stone) -> obsidian { return lib.engine_badge(ofs_array_get(c_engine, i)) }
+
+    // ── trabalho em passos ───────────────────────────────────────────────
+    vein start(dir: obsidian) -> void {
+        src = dir
+        lib.detect(dir)
+        busy = true
+        stage = 0
+        pos = 0
+        pct = 0
+        result = -1
+        label = tr("imp_tamanho")
+        t0 = now_s()
+        lib.size_start(dir)
+        oal.set_animating(true)
+    }
+
+    vein cancel() -> void {
+        if (!busy) { return }
+        busy = false
+        oal.set_animating(false)
+        oal.toast(tr("imp_cancelado"))
+        oal.refresh()
+    }
+
+    // Um passo por quadro. Devolve true quando terminou neste passo.
+    vein step() -> bool {
+        if (!busy) { return false }
+        if (stage == 0) {
+            if (!lib.size_step(400)) {
+                pct = 0
+                label = tr("imp_tamanho") + " · " + lib.human_size(lib.sz_total)
+                return false
+            }
+            size = lib.sz_total
+            if (!tx.eq(lib.detect(src), "tactics_moon")) {
+                result = lib.add_detected(src, "", size, stamp())
+                return _finish()
+            }
+            // MOON.: abre o pacote e lista os scripts
+            if (!sjis_ok) { sjis_ok = tm.load_sjis(sjis_path) }
+            dst = lib.root + "/games/moon"
+            bx.mkdir_p(dst + "/scripts")
+            bx.mkdir_p(dst + "/images/sprites")
+            pk = tm.pack_open(src + "/moon_eng")
+            if (pk < 0 || !sjis_ok) {
+                busy = false
+                oal.set_animating(false)
+                oal.toast(tr("erro_jogo"))
+                return true
+            }
+            items = tm.script_names(pk)
+            pos = 0
+            script_dir = "scripts"
+            stage = 1
+            return false
+        }
+        if (stage == 1) {
+            forge n = ofs_array_len(items)
+            // scripts sao rapidos: varios por quadro
+            forge k = 0
+            while (k < 4 && pos < n) {
+                forge spk = pk
+                if (tx.eq(script_dir, "scripts_jp")) { spk = jp_pk }
+                tm.convert_script_one(spk, dst + "/" + script_dir, ofs_array_get(items, pos))
+                pos++
+                k++
+            }
+            pct = (pos * 100) / (n + 1)
+            label = tr("imp_scripts") + " " + script_dir + " " + tx.num(pos) + "/" + tx.num(n)
+            if (pos >= n && tx.eq(script_dir, "scripts")) {
+                // depois do ingles, os scripts japoneses (moon_jp)
+                forge jp = tm.pack_open(src + "/moon_jp")
+                if (jp >= 0) {
+                    script_dir = "scripts_jp"
+                    bx.mkdir_p(dst + "/scripts_jp")
+                    jp_pk = jp
+                    items = tm.script_names(jp)
+                    pos = 0
+                    return false
+                }
+            }
+            if (pos >= n) {
+                items = tm.image_bases(pk)
+                pos = 0
+                man = json.obj()
+                stage = 2
+            }
+            return false
+        }
+        if (stage == 2) {
+            forge ni = ofs_array_len(items)
+            if (pos < ni) {
+                tm.convert_image_one(pk, man, dst + "/images", dst + "/images/sprites", ofs_array_get(items, pos))
+                pos++
+            }
+            pct = (pos * 100) / (ni + 1)
+            label = tr("imp_imagens") + " " + tx.num(pos) + "/" + tx.num(ni)
+            if (pos >= ni) {
+                json.save(dst + "/images/manifest.json", man, "  ")
+                stage = 3
+            }
+            return false
+        }
+        // final: game.json, capa (imagem do menu de titulo) e biblioteca
+        tm.write_meta(dst, src, stamp())
+        lib.detect(src)
+        lib.d_cover = title_cover(dst)
+        result = lib.add_detected(src, dst, size, stamp())
+        tm._log("import: " + tx.num(now_s() - t0) + " s")
+        return _finish()
+    }
+
+    vein _finish() -> bool {
+        busy = false
+        oal.set_animating(false)
+        oal.toast(tr("imp_feito"))
+        return true
+    }
+
+    // Imagem "normal" do primeiro menu do INIT (a tela de titulo).
+    vein title_cover(gdir: obsidian) -> obsidian {
+        forge m = json.mark()
+        forge o = json.load(gdir + "/scripts/INIT.json")
+        forge c = json.first(json.get(o, "instructions"))
+        forge out = ""
+        while (c >= 0) {
+            if (tx.eq(json.gs(c, "op", ""), "menu")) {
+                out = tx.copy(tx.upper(json.gs(c, "normal", "")))
+                break
+            }
+            c = json.next(c)
+        }
+        json.release(m)
+        if (tx.len(out) > 0 && bx.exists(gdir + "/images/" + out + ".png")) { return gdir + "/images/" + out + ".png" }
+        forge bgs = bx.list_dir(gdir + "/images", 1)
+        forge i = 0
+        while (i < ofs_array_len(bgs)) {
+            forge f: obsidian = ofs_array_get(bgs, i)
+            if (tx.starts(f, "BG")) { return gdir + "/images/" + f }
+            i++
+        }
+        return ""
+    }
+}
