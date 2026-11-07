@@ -1,7 +1,17 @@
-# M.O.O.N — workflow independente para gerar e publicar pacotes de plugins (.moonpack).
+# M.O.O.N — gera e publica os pacotes de plugins (.moonpack) e o index.json das releases.
 #
-# Dispara em: push de tag v* (ex.: v0.3.0) e manualmente (workflow_dispatch).
-# Publica: arquivos .moonpack e index.json consolidado na Release do GitHub.
+# - html5: rpgm, tyrano (plugins/<plugin>, tools/pack.sh)
+# - renpy: todas as versões de plugins/renpy/versions.txt (gerada por renpy/list_versions.sh)
+# - godot: todas as versões de plugins/godot/versions.txt (gerada por godot/list_versions.sh);
+#          o motor é compilado (scons + NDK da versão) e fica em cache por versão.
+# Versão nova = rodar renpy/list_versions.sh / godot/list_versions.sh e commitar o versions.txt.
+#
+# Onde publica (tag):
+#   push de tag v*                              -> na própria tag
+#   workflow_dispatch com tag_name              -> nessa release
+#   workflow_dispatch sem tag_name              -> na ÚLTIMA release (gh release view)
+# O index.json publicado é o da release atual MESCLADO com o que este run gerou
+# (as versões que falharam não entram; as que já estavam publicadas continuam).
 
 name: Build Packs
 
@@ -9,7 +19,11 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag da release onde publicar (ex.: v0.3.0). Deixe vazio se executado a partir de uma tag.'
+        description: 'Tag da release onde publicar (ex.: v0.3.0). Vazio = última release.'
+        required: false
+        default: ''
+      versoes:
+        description: 'Só estas versões (ex.: renpy:8.4.1,godot:4.7.2,html5:rpgm). Vazio = todas.'
         required: false
         default: ''
   push:
@@ -18,64 +32,214 @@ on:
 permissions:
   contents: write
 
+env:
+  # versões de SDK usadas pelos scripts dos adaptadores (javac + d8)
+  BUILD_TOOLS_VER: '36.1.0'
+  ANDROID_PLATFORM: 'android-34'
+
 jobs:
-  html5:
-    name: Pacotes HTML5 (${{ matrix.plugin }})
+  matriz:
+    name: Montar matriz e tag
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descobrir a tag da release
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then TAG="$GITHUB_REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then TAG="$INPUT_TAG"
+          else TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          [ -n "$TAG" ] || { echo "::error::sem release para publicar"; exit 1; }
+          echo "Publicando em: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Montar a matriz a partir dos versions.txt
+        id: m
+        env:
+          VERSOES: ${{ github.event.inputs.versoes }}
+        run: |
+          want() { [ -z "$VERSOES" ] || [[ ",$VERSOES," == *",$1:$2,"* || ",$VERSOES," == *",$1:*,"* ]]; }
+          {
+            for p in rpgm tyrano; do want html5 "$p" && echo "{\"tipo\":\"html5\",\"versao\":\"$p\",\"id\":\"html5-$p\"}"; done
+            while read -r v; do [ -n "$v" ] && want renpy "$v" && echo "{\"tipo\":\"renpy\",\"versao\":\"$v\",\"id\":\"renpy-$v\"}"; done < plugins/renpy/versions.txt
+            while read -r v; do [ -n "$v" ] && want godot "$v" && echo "{\"tipo\":\"godot\",\"versao\":\"$v\",\"id\":\"godot-$v\"}"; done < plugins/godot/versions.txt
+            true
+          } | jq -s -c '{include: .}' > matrix.json
+          [ "$(jq '.include|length' matrix.json)" -gt 0 ] || { echo "::error::nenhuma versão selecionada"; exit 1; }
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          jq -r '.include[].id' matrix.json | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+
+  pack:
+    name: ${{ matrix.id }}
+    needs: matriz
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.tipo == 'godot' && 360 || 40 }}
     strategy:
       fail-fast: false
-      matrix:
-        plugin: [rpgm, tyrano]
+      matrix: ${{ fromJSON(needs.matriz.outputs.matrix) }}
+    env:
+      TAG: ${{ needs.matriz.outputs.tag }}
+      BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.matriz.outputs.tag }}
     steps:
-      - name: Checkout do M.O.O.N
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Instalar ferramentas (zip, jq)
-        run: sudo apt-get update && sudo apt-get install -y zip jq
+      - name: Ferramentas (zip, jq, unzip)
+        run: sudo apt-get update && sudo apt-get install -y zip unzip jq
 
-      - name: Gerar pacotes .moonpack para ${{ matrix.plugin }}
-        working-directory: plugins
-        run: |
-          mkdir -p dist
-          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
-          tools/pack.sh ${{ matrix.plugin }} --out dist --base-url "https://github.com/${{ github.repository }}/releases/download/$TAG"
-          ls -la dist/
-
-      - name: Salvar artefato do pacote
-        uses: actions/upload-artifact@v4
+      # ── JDK + Android SDK (renpy e godot: javac + d8 dos adaptadores) ──
+      - name: JDK 17
+        if: matrix.tipo != 'html5'
+        uses: actions/setup-java@v4
         with:
-          name: "packs-${{ matrix.plugin }}"
-          path: plugins/dist
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        if: matrix.tipo != 'html5'
+        uses: android-actions/setup-android@v3
+        with:
+          # o padrão tenta instalar o pacote 'tools', que não existe mais
+          packages: ''
+
+      - name: Pacotes do SDK (platform + build-tools)
+        if: matrix.tipo != 'html5'
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;$ANDROID_PLATFORM" "build-tools;$BUILD_TOOLS_VER"
+          echo "ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "BUILD_TOOLS=$ANDROID_HOME/build-tools/$BUILD_TOOLS_VER" >> "$GITHUB_ENV"
+
+      - name: Saída dos pacotes
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          echo "OUT=$GITHUB_WORKSPACE/dist" >> "$GITHUB_ENV"
+
+      # ── HTML5 ──
+      - name: Pacotes HTML5 (${{ matrix.versao }})
+        if: matrix.tipo == 'html5'
+        working-directory: plugins
+        run: tools/pack.sh "${{ matrix.versao }}" --out "$OUT" --base-url "$BASE_URL"
+
+      # ── Ren'Py ──
+      - name: Cache do RAPT (${{ matrix.versao }})
+        if: matrix.tipo == 'renpy'
+        uses: actions/cache@v4
+        with:
+          path: |
+            plugins/renpy/build/renpy-${{ matrix.versao }}-rapt.zip
+            plugins/renpy/build/renpy-8.4.1-rapt.zip
+          key: rapt-${{ matrix.versao }}
+
+      - name: Pacote Ren'Py ${{ matrix.versao }}
+        if: matrix.tipo == 'renpy'
+        working-directory: plugins/renpy
+        run: |
+          mkdir -p build
+          pack/build.sh "${{ matrix.versao }}"
+
+      # ── Godot ──
+      - name: Cache do motor Godot ${{ matrix.versao }}
+        if: matrix.tipo == 'godot'
+        id: motor
+        uses: actions/cache@v4
+        with:
+          path: plugins/godot/out/engine/godot-${{ matrix.versao }}-arm64
+          key: godot-engine-${{ matrix.versao }}-${{ hashFiles('plugins/godot/build_engine.sh') }}
+
+      - name: Cache do código-fonte do Godot ${{ matrix.versao }}
+        if: matrix.tipo == 'godot' && steps.motor.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/godot-src/godot-${{ matrix.versao }}
+          key: godot-src-${{ matrix.versao }}
+
+      - name: Compilar o motor Godot ${{ matrix.versao }} (scons + NDK da versão)
+        if: matrix.tipo == 'godot' && steps.motor.outputs.cache-hit != 'true'
+        working-directory: plugins/godot
+        run: |
+          sudo apt-get install -y build-essential pkg-config
+          python3 -m pip install --user --break-system-packages scons || python3 -m pip install --user scons
+          export PATH="$HOME/.local/bin:$PATH"
+          export GODOT_SRC="$HOME/godot-src/godot-${{ matrix.versao }}"
+          mkdir -p "$(dirname "$GODOT_SRC")"
+          ./build_engine.sh "${{ matrix.versao }}" debug
+
+      - name: Pacote Godot ${{ matrix.versao }}
+        if: matrix.tipo == 'godot'
+        working-directory: plugins/godot
+        run: pack/build.sh "${{ matrix.versao }}"
+
+      - name: Nomear o índice deste job (nome único)
+        run: |
+          ls -la dist/
+          mv dist/index.json "dist/index-${{ matrix.id }}.json"
+          jq -c '.plugins[]|{id,url}' "dist/index-${{ matrix.id }}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pack-${{ matrix.id }}
+          path: |
+            dist/*.moonpack
+            dist/index-*.json
+          if-no-files-found: error
+
+      - name: Resumo da falha
+        if: failure()
+        run: echo "- FALHOU ${{ matrix.id }}" >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: Consolidar e Publicar na Release
-    needs: [html5]
+    name: Consolidar e publicar
+    needs: [matriz, pack]
+    if: ${{ !cancelled() && needs.matriz.result == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.matriz.outputs.tag }}
     steps:
-      - name: Baixar artefatos gerados
+      - name: Baixar os pacotes de todos os jobs que deram certo
         uses: actions/download-artifact@v4
         with:
+          pattern: pack-*
           path: dist
-          merge-multiple: true
+          merge-multiple: true   # nomes únicos (index-<id>.json): nada é sobrescrito
 
-      - name: Consolidar index.json com todos os plugins
+      - name: Consolidar o index.json
+        env:
+          MATRIX: ${{ needs.matriz.outputs.matrix }}
         run: |
-          sudo apt-get update && sudo apt-get install -y jq
-          if ls dist/index.json 1>/dev/null 2>&1; then
-            jq -s '{versao:1, nome:"Plugins do M.O.O.N", plugins:(map(.plugins)|add|unique_by(.id)|sort_by(.id))}' dist/index.json > index.json
-          else
-            echo '{"versao":1,"nome":"Plugins do M.O.O.N","plugins":[]}' > index.json
-          fi
-          echo "=== index.json consolidado ==="
-          cat index.json
-          echo "=== Arquivos para upload ==="
-          ls -la dist/
+          shopt -s nullglob
+          mkdir -p dist; cd dist
+          new=(index-*.json)
+          # índice já publicado (se houver): o que este run não refez continua valendo
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern index.json --output antigo.json 2>/dev/null || echo '{"plugins":[]}' > antigo.json
+          jq -e '.plugins' antigo.json >/dev/null || echo '{"plugins":[]}' > antigo.json
+          # os novos vêm primeiro: unique_by mantém a primeira ocorrência de cada id
+          jq -s '{versao:1, nome:"Plugins do M.O.O.N", plugins:([.[]|.plugins]|add|unique_by(.id)|sort_by(.id))}' "${new[@]}" antigo.json > ../index.json
+          cd ..
+          echo "=== index.json: $(jq '.plugins|length' index.json) plugins ==="
+          # resumo: quem falhou
+          {
+            echo "## Pacotes"
+            echo "Release: \`$TAG\`"
+            ok=0; fail=0
+            for id in $(echo "$MATRIX" | jq -r '.include[].id'); do
+              if [ -f "dist/index-$id.json" ]; then ok=$((ok+1)); else fail=$((fail+1)); echo "- FALHOU: $id"; fi
+            done
+            echo; echo "OK: $ok, falharam: $fail"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publicar pacotes e index.json na release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
-          files: |
-            dist/*.moonpack
-            index.json
+      - name: Publicar *.moonpack e index.json na release
+        run: |
+          shopt -s nullglob
+          packs=(dist/*.moonpack)
+          [ ${#packs[@]} -gt 0 ] || { echo "nenhum pacote novo: nada a publicar"; exit 0; }
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes ""
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${packs[@]}" index.json

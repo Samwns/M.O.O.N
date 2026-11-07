@@ -113,29 +113,16 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/moon-release.jks"
 
-      - name: Empacotar plugins (.moonpack)
-        run: |
-          cd OFS/Moon/plugins
-          mkdir -p dist
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
-          tools/pack.sh rpgm --out dist --base-url "$BASE_URL"
-          tools/pack.sh tyrano --out dist --base-url "$BASE_URL"
-          ls -lh dist/
-
-      - name: Upload APK e Plugins como artefatos
+      - name: Upload APK como artefato
         uses: actions/upload-artifact@v4
         with:
-          name: moon-release-artifacts
+          name: moon-release-apk
           path: |
             OFS/Moon/moon/build/android/moon-*-release.apk
-            OFS/Moon/plugins/dist/*.moonpack
-            OFS/Moon/plugins/dist/index.json
 
-      - name: Anexar APK e Plugins na release da tag
+      - name: Anexar APK na release da tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             OFS/Moon/moon/build/android/moon-*-release.apk
-            OFS/Moon/plugins/dist/*.moonpack
-            OFS/Moon/plugins/dist/index.json

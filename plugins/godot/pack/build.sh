@@ -7,13 +7,23 @@
 #                          (godot-lib + Kotlin + androidx; Java do motor, de terceiros)
 #   godot-res.apk          AndroidManifest.xml + resources.arsc + res/ do mesmo template (R.* do godot-lib)
 #   libgodot_android.so    motor próprio (../build_engine.sh, disable_path_overrides=no) + libc++_shared.so
-# Saída: Moon/plugins/dist/ (+ index.json), via ../../tools/pack.sh.
+# Saída: OUT (padrão Moon/plugins/dist/) + index.json (BASE_URL = prefixo das URLs), via ../../tools/pack.sh.
+# Env: ANDROID_SDK, ANDROID_HOME, BUILD_TOOLS, TEMPLATE_APK (baixa o template oficial se faltar), GODOT_SRC, OUT, BASE_URL.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 V="${1:-4.7.2}"
 TPL="${TEMPLATE_APK:-$HOME/.local/share/godot/export_templates/$V.stable/android_debug.apk}"
 ENG="$HERE/../out/engine/godot-$V-arm64"
-[ -f "$TPL" ] || { echo "falta o template $TPL (rode ../build.sh $V uma vez)"; exit 1; }
+if [ ! -f "$TPL" ]; then
+  # template oficial android_debug.apk (só o classes*.dex/res/manifest são usados, não o .so)
+  mkdir -p "$(dirname "$TPL")"; T="$(mktemp -d)"
+  for U in "https://github.com/godotengine/godot-builds/releases/download/$V-stable/Godot_v$V-stable_export_templates.tpz" \
+           "https://github.com/godotengine/godot/releases/download/$V-stable/Godot_v$V-stable_export_templates.tpz"; do
+    curl -fsSL -o "$T/t.tpz" "$U" && break || rm -f "$T/t.tpz"
+  done
+  [ -f "$T/t.tpz" ] || { echo "não consegui baixar o export template do Godot $V"; exit 1; }
+  unzip -q -o -j "$T/t.tpz" templates/android_debug.apk -d "$T" && mv "$T/android_debug.apk" "$TPL"; rm -rf "$T"
+fi
 [ -f "$ENG/libgodot_android.debug.so" ] || "$HERE/../build_engine.sh" "$V" debug
 DEX="$HERE/../adaptador/build/adaptador.dex"
 [ -f "$DEX" ] || "$HERE/../adaptador/build.sh"

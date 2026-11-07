@@ -41,7 +41,7 @@ screen biblioteca
     text tr("perm_passos")
     button.primario tr("perm_botao") icon=shield -> app.pedir_permissao
   else
-    field tr("buscar") value=lib.query icon=search -> @busca
+    field tr("buscar") value=lib.query icon=search -> app.busca_abrir
     text lib.resumo()
     grid jogos from lib.jogos columns=2 landscape=4
       card title=item.nome sub=item.sub image=item.capa icon=item.icone badge=item.motor badge_icon=item.icone long=app.menu_jogo(item) -> app.abrir_detalhes(item)
@@ -188,7 +188,7 @@ screen renomear
     button.icon "back" -> @back
     button.icon "check" -> app.renomear_ok
   text tr("nome")
-  field tr("nome") value=app.edit_show() icon=edit -> app.noop
+  field tr("nome") value=app.edit_show() icon=edit -> app.renomear_campo
   keyboard -> app.edit_tecla(item)
 
 // 4 ─────────────────────────────────────────────────────────────────────
@@ -452,7 +452,7 @@ screen backlog
 screen busca
   bar tr("buscar")
     button.icon "back" -> @back
-  field tr("buscar") value=app.busca_show() icon=search -> app.noop
+  field tr("buscar") value=app.busca_show() icon=search -> app.busca_campo
   keyboard -> app.busca_tecla(item)
   grid resultados from lib.jogos columns=3 landscape=5
     card title=item.nome sub=item.motor image=item.capa icon=item.icone -> app.abrir_detalhes(item)
@@ -527,7 +527,8 @@ screen urlcfg
     button.icon "back" -> @back
     button.icon "check" -> app.url_ok
   text tr("pl_url_dica")
-  field tr("pl_url") value=app.url_show() icon=edit -> app.noop
+  field tr("pl_url") value=app.url_show() icon=edit -> app.url_campo
+  button tr("pl_url_padrao") icon=reload -> app.url_padrao
   keyboard -> app.url_tecla(item)
 
 // 18 ────────────────────────────────────────────────────────────────────
@@ -561,5 +562,5 @@ screen descricao
     button.icon "back" -> @back
     button.icon "check" -> app.descricao_ok
   text tr("descricao")
-  text app.desc_show()
+  field tr("descricao") value=app.desc_show() icon=edit -> app.desc_campo
   keyboard -> app.desc_tecla(item)

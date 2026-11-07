@@ -34,7 +34,7 @@ for t in jq zip sha256sum; do command -v "$t" >/dev/null || die "falta o comando
 SRC="${1:-}"; [ -n "$SRC" ] && [ -d "$SRC" ] || die "uso: pack.sh <pasta-do-plugin> [--versao-motor V] [--out DIR] [--base-url URL]"
 shift
 SRC="$(cd "$SRC" && pwd)"
-OUT="$ROOT/dist"; BASE=""; ARCH=""; VERSOES=(); PKGVER=""
+OUT="${OUT:-$ROOT/dist}"; BASE="${BASE_URL:-}"; BASE="${BASE%/}"; ARCH=""; VERSOES=(); PKGVER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --versao-motor) VERSOES+=("$2"); shift 2 ;;

@@ -13,6 +13,9 @@ ZIP="${2:-$B/renpy-$V-rapt.zip}"
 case "$V" in
   8.3.7) EXP=ea3a96dc59a276464fcec30eb5371e12178be563348b1e318a5f236c3511ef9f; PY=3.9;;
   8.4.1) EXP=d6bedea5e5f823516cefd09e461c6ee18af3e4ba210075fd008875014f7a436e; PY=3.12;;
+  7.*) EXP=""; PY=2.7;;
+  8.0.*|8.1.*|8.2.*|8.3.*) EXP=""; PY=3.9;;
+  8.4.*|8.5.*|8.6.*) EXP=""; PY=3.12;;
   *) EXP=""; PY="?";;
 esac
 SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)

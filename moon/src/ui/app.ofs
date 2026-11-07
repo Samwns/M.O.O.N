@@ -238,7 +238,43 @@ namespace app {
 
     vein girou() -> void { oal.refresh() }
 
+    // ── entrada de texto pelo teclado do sistema (Gboard, colar, cursor) ──
+    // O teclado da OAL (keyboard) continua nas telas como alternativa/fallback.
+    forge ed_alvo: stone = 0   // 1 url, 2 renomear, 3 descricao, 4 busca
+    vein _sys_edit(alvo: stone, titulo: obsidian, texto: obsidian, multi: bool) -> void {
+        oal.edit_ok_label = tr("txt_ok")
+        oal.edit_cancel_label = tr("txt_cancelar")
+        ed_alvo = 0
+        if (oal.edit_open(titulo, texto, multi)) { ed_alvo = alvo }
+    }
+    vein _edit_fim() -> void {
+        forge ok = oal.edit_state == 2
+        forge t = tx.copy(oal.edit_text)
+        forge alvo = ed_alvo
+        ed_alvo = 0
+        oal.edit_done()
+        if (!ok) {
+            oal.refresh()
+            return
+        }
+        if (alvo == 1) {
+            url_text = t
+            url_ok()
+        } else if (alvo == 2) {
+            edit_text = t
+            renomear_ok()
+        } else if (alvo == 3) {
+            desc_text = t
+            descricao_ok()
+        } else if (alvo == 4) {
+            lib.query = t
+            lib.update_view()
+            oal.back()
+        }
+    }
+
     vein quadro() -> void {
+        if (oal.edit_state >= 2) { _edit_fim() }
         if (imp.busy) {
             forge fim = imp.step()
             oal.refresh()
@@ -920,7 +956,9 @@ namespace app {
         oal.kb_shift = false
         oal.kb_layer = 0
         oal.go(S_REN)
+        _sys_edit(2, tr("nome"), edit_text, false)
     }
+    vein renomear_campo() -> void { _sys_edit(2, tr("nome"), edit_text, false) }
 
     vein edit_show() -> obsidian { return edit_text + "|" }
 
@@ -988,7 +1026,9 @@ namespace app {
         oal.kb_shift = false
         oal.kb_layer = 0
         oal.go(S_DESC)
+        _sys_edit(3, tr("descricao"), desc_text, true)
     }
+    vein desc_campo() -> void { _sys_edit(3, tr("descricao"), desc_text, true) }
     vein desc_show() -> obsidian { return desc_text + "|" }
     vein desc_tecla(cp: stone) -> void {
         // Enter insere nova linha; o check da barra salva (descricao_ok)
@@ -1434,7 +1474,9 @@ namespace app {
         oal.kb_shift = false
         oal.kb_layer = 0
         oal.go(S_URL)
+        _sys_edit(1, tr("pl_url_titulo"), url_text, false)
     }
+    vein url_campo() -> void { _sys_edit(1, tr("pl_url_titulo"), url_text, false) }
     vein url_show() -> obsidian { return url_text + "|" }
     vein url_tecla(cp: stone) -> void {
         if (cp == 10) {
@@ -1442,6 +1484,10 @@ namespace app {
             return
         }
         url_text = edit_key(cp, url_text)
+        oal.refresh()
+    }
+    vein url_padrao() -> void {
+        url_text = cfg.plugin_default
         oal.refresh()
     }
     vein url_ok() -> void {
@@ -2039,6 +2085,11 @@ namespace app {
     }
 
     // ── busca ────────────────────────────────────────────────────────────
+    vein busca_abrir() -> void {
+        oal.go(S_BUSCA)
+        _sys_edit(4, tr("buscar"), lib.query, false)
+    }
+    vein busca_campo() -> void { _sys_edit(4, tr("buscar"), lib.query, false) }
     vein busca_show() -> obsidian { return lib.query + "|" }
     vein busca_tecla(cp: stone) -> void {
         if (cp == 10) {

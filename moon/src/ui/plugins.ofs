@@ -239,6 +239,7 @@ namespace plg {
         forge text = ahttp.get_text(url)
         if (tx.len(text) == 0) {
             index_msg = tr("pl_indice_erro") + ": " + ahttp.error
+            if (tx.eq(ahttp.error, "HTTP 404")) { index_msg = tr("pl_indice_404") }
             return false
         }
         return parse_index(text)
@@ -557,6 +558,7 @@ namespace plg {
         dl_pct = 0
         if (!ahttp.open(url)) {
             msg = tr("pl_download_erro") + ": " + ahttp.error
+            if (tx.eq(ahttp.error, "HTTP 404")) { msg = tr("pl_download_erro") + ": " + tr("pl_arquivo_404") }
             return false
         }
         dl_fp = fopen(dl_path, "wb")

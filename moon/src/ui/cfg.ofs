@@ -27,7 +27,8 @@ namespace cfg {
     forge game_lang: obsidian = "en" // textos do MOON.: en (com patch) ou ja
     forge settings_tab: stone = 0
     forge player_orient: stone = 2   // player: 2 paisagem (padrao), 1 retrato
-    forge plugin_index: obsidian = "" // URL do index.json dos plugins (https://, file:// ou caminho)
+    forge plugin_default: obsidian = "https://github.com/Samwns/M.O.O.N/releases/latest/download/index.json"
+    forge plugin_index: obsidian = "https://github.com/Samwns/M.O.O.N/releases/latest/download/index.json" // URL do index.json dos plugins (https://, file:// ou caminho); vazio = so pacotes locais
 
     vein load(p: obsidian) -> void {
         path = p
@@ -52,6 +53,8 @@ namespace cfg {
         game_lang = json.gs(o, "game_lang", game_lang)
         player_orient = json.gi(o, "player_orient", player_orient)
         plugin_index = tx.copy(json.gs(o, "plugin_index", plugin_index))
+        // configs antigas gravavam "" por padrao: sem a marca plugin_index_set, vazio = padrao
+        if (tx.len(plugin_index) == 0 && json.gi(o, "plugin_index_set", 0) == 0) { plugin_index = plugin_default }
         custom = []
         forge cc = json.first(json.get(o, "custom_colors"))
         while (cc >= 0) {
@@ -87,6 +90,7 @@ namespace cfg {
         json.put_s(o, "game_lang", game_lang)
         json.put_i(o, "player_orient", player_orient)
         json.put_s(o, "plugin_index", plugin_index)
+        json.put_i(o, "plugin_index_set", 1)
         if (ofs_array_len(custom) >= COLOR_COUNT) {
             forge ca = json.arr()
             forge ck = 0
@@ -467,9 +471,12 @@ namespace cfg {
         _t("pl_url", "URL do index.json", "index.json URL", "URL del index.json")
         _t("pl_url_vazia", "(não configurada - defina nas Configurações)", "(not set - set it in Settings)", "(sin configurar - defínela en Ajustes)")
         _t("pl_url_titulo", "URL do repositório de plugins", "Plugin repository URL", "URL del repositorio de plugins")
-        _t("pl_url_dica", "Endereço do index.json (https://… ou file:///sdcard/…). Em branco: só pacotes locais.", "index.json address (https://… or file:///sdcard/…). Empty: local packs only.", "Dirección del index.json (https://… o file:///sdcard/…). Vacío: solo paquetes locales.")
+        _t("pl_url_dica", "Endereço do index.json (https://… ou file:///sdcard/…). Padrão: releases do M.O.O.N no GitHub. Em branco: só pacotes locais.", "index.json address (https://… or file:///sdcard/…). Default: M.O.O.N GitHub releases. Empty: local packs only.", "Dirección del index.json (https://… o file:///sdcard/…). Por defecto: releases de M.O.O.N en GitHub. Vacío: solo paquetes locales.")
         _t("pl_atualizar_lista", "Atualizar lista", "Refresh list", "Actualizar lista")
         _t("pl_importar_local", "Importar .moonpack de Download", "Import .moonpack from Download", "Importar .moonpack de Download")
+        _t("txt_ok", "OK", "OK", "OK")
+        _t("txt_cancelar", "Cancelar", "Cancel", "Cancelar")
+        _t("pl_url_padrao", "Restaurar padrão", "Restore default", "Restaurar predeterminado")
         _t("pl_url_editar", "Alterar URL", "Change URL", "Cambiar URL")
         _t("pl_instalado", "Instalado", "Installed", "Instalado")
         _t("pl_instalado_v", "instalado", "installed", "instalado")
@@ -496,6 +503,8 @@ namespace cfg {
         _t("pl_pacotes", "pacotes", "packages", "paquetes")
         _t("pl_sem_url", "Repositório não configurado", "Repository not set", "Repositorio sin configurar")
         _t("pl_indice_erro", "Não consegui baixar o index.json", "Could not download index.json", "No pude descargar el index.json")
+        _t("pl_indice_404", "Nenhum index.json publicado ainda nesse endereço (HTTP 404). Use Alterar URL ou importe um .moonpack.", "No index.json published at this address yet (HTTP 404). Use Change URL or import a .moonpack.", "Aún no hay index.json en esta dirección (HTTP 404). Usa Cambiar URL o importa un .moonpack.")
+        _t("pl_arquivo_404", "pacote não encontrado no servidor (HTTP 404)", "package not found on the server (HTTP 404)", "paquete no encontrado en el servidor (HTTP 404)")
         _t("pl_indice_invalido", "index.json inválido", "Invalid index.json", "index.json inválido")
         _t("pl_pacotes_no_indice", "pacote(s) no índice", "package(s) in the index", "paquete(s) en el índice")
         _t("pl_pacote_invalido", "Pacote inválido", "Invalid package", "Paquete inválido")

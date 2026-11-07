@@ -12,6 +12,7 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Arquivos/sdk_android}"
 cd "$SRC"
 NDK="$(python3 -c "import re;print(re.search(r'return \"([0-9.]+)\"',open('platform/android/detect.py').read().split('def get_ndk_version')[1]).group(1))")"
 echo "NDK exigido: $NDK"
+[ -d "$ANDROID_HOME/ndk/$NDK" ] || { command -v sdkmanager >/dev/null && yes | sdkmanager "ndk;$NDK" >/dev/null; }
 [ -d "$ANDROID_HOME/ndk/$NDK" ] || { echo "instale o NDK $NDK em $ANDROID_HOME/ndk"; exit 1; }
 export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/$NDK"
 # a opcao so existe a partir do 4.6 (antes nao ha restricao de --main-pack); passa so se o SConstruct a conhece

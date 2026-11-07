@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Adaptador Ren'Py do M.O.O.N (adaptador.dex), sem Gradle: javac + d8.
 # Uso: ./build.sh [renpy-8.4.1-rapt.zip]      Saída: build/adaptador.dex
+# Env: RAPT_VERSION (padrão 8.4.1), ADAPTADOR_BUILD (pasta de saída), ANDROID_SDK, BUILD_TOOLS.
 #
 # Java de terceiros: org.libsdl.app.* / org.jnius.* / org.renpy.android.* do RAPT
 # oficial (sha256 conferido; idêntico em 8.3.x/8.4.x), extraído a cada build.
@@ -14,13 +15,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK="${ANDROID_SDK:-$HOME/Arquivos/sdk_android}"
 BT="${BUILD_TOOLS:-$SDK/build-tools/36.1.0}"
 JAR="$SDK/platforms/android-34/android.jar"
-RAPT_ZIP="${1:-${RAPT_ZIP:-$HERE/../build/renpy-8.4.1-rapt.zip}}"
-RAPT_URL="https://www.renpy.org/dl/8.4.1/renpy-8.4.1-rapt.zip"
-RAPT_SHA="d6bedea5e5f823516cefd09e461c6ee18af3e4ba210075fd008875014f7a436e"
-B="$HERE/build"; mkdir -p "$B"
+RV="${RAPT_VERSION:-8.4.1}"      # versão do RAPT de onde sai o Java (7.x usa o seu próprio)
+RAPT_ZIP="${1:-${RAPT_ZIP:-$HERE/../build/renpy-$RV-rapt.zip}}"
+RAPT_URL="https://www.renpy.org/dl/$RV/renpy-$RV-rapt.zip"
+RAPT_SHA=""; [ "$RV" = 8.4.1 ] && RAPT_SHA="d6bedea5e5f823516cefd09e461c6ee18af3e4ba210075fd008875014f7a436e"
+B="${ADAPTADOR_BUILD:-$HERE/build}"; mkdir -p "$B" "$(dirname "$RAPT_ZIP")"
 
 [ -f "$RAPT_ZIP" ] || curl -fL -o "$RAPT_ZIP" "$RAPT_URL"
-echo "$RAPT_SHA  $RAPT_ZIP" | sha256sum -c - >/dev/null || { echo "sha256 do RAPT diverge"; exit 1; }
+[ -z "$RAPT_SHA" ] || echo "$RAPT_SHA  $RAPT_ZIP" | sha256sum -c - >/dev/null || { echo "sha256 do RAPT diverge"; exit 1; }
 
 J="$B/java"; rm -rf "$J" "$B/classes" "$B/dex"; mkdir -p "$J" "$B/classes" "$B/dex"
 P=rapt/prototype/renpyandroid/src/main/java
