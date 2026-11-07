@@ -1,0 +1,81 @@
+# M.O.O.N — workflow independente para gerar e publicar pacotes de plugins (.moonpack).
+#
+# Dispara em: push de tag v* (ex.: v0.3.0) e manualmente (workflow_dispatch).
+# Publica: arquivos .moonpack e index.json consolidado na Release do GitHub.
+
+name: Build Packs
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag da release onde publicar (ex.: v0.3.0). Deixe vazio se executado a partir de uma tag.'
+        required: false
+        default: ''
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  html5:
+    name: Pacotes HTML5 (${{ matrix.plugin }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [rpgm, tyrano]
+    steps:
+      - name: Checkout do M.O.O.N
+        uses: actions/checkout@v4
+
+      - name: Instalar ferramentas (zip, jq)
+        run: sudo apt-get update && sudo apt-get install -y zip jq
+
+      - name: Gerar pacotes .moonpack para ${{ matrix.plugin }}
+        working-directory: plugins
+        run: |
+          mkdir -p dist
+          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          tools/pack.sh ${{ matrix.plugin }} --out dist --base-url "https://github.com/${{ github.repository }}/releases/download/$TAG"
+          ls -la dist/
+
+      - name: Salvar artefato do pacote
+        uses: actions/upload-artifact@v4
+        with:
+          name: "packs-${{ matrix.plugin }}"
+          path: plugins/dist
+
+  release:
+    name: Consolidar e Publicar na Release
+    needs: [html5]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar artefatos gerados
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Consolidar index.json com todos os plugins
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          if ls dist/index.json 1>/dev/null 2>&1; then
+            jq -s '{versao:1, nome:"Plugins do M.O.O.N", plugins:(map(.plugins)|add|unique_by(.id)|sort_by(.id))}' dist/index.json > index.json
+          else
+            echo '{"versao":1,"nome":"Plugins do M.O.O.N","plugins":[]}' > index.json
+          fi
+          echo "=== index.json consolidado ==="
+          cat index.json
+          echo "=== Arquivos para upload ==="
+          ls -la dist/
+
+      - name: Publicar pacotes e index.json na release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          files: |
+            dist/*.moonpack
+            index.json
