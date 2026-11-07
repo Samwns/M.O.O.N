@@ -50,6 +50,9 @@ jobs:
 
       - name: Android SDK, build-tools 37, platform 35, NDK 29
         uses: android-actions/setup-android@v3
+        with:
+          # o padrão tenta instalar o pacote 'tools', que não existe mais
+          packages: ''
 
       - name: Instalar pacotes do SDK e ferramentas
         run: |
