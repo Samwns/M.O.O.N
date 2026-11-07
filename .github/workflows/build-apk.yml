@@ -69,8 +69,16 @@ jobs:
           MOON_KEY_PASS: ${{ secrets.MOON_KEY_PASS }}
         run: |
           KS="$RUNNER_TEMP/moon-release.jks"
-          printf '%s' "$MOON_KEYSTORE_B64" | base64 -d > "$KS"
+          if [ -z "$MOON_KEYSTORE_B64" ]; then
+            echo "::error::Secret MOON_KEYSTORE_B64 vazio ou inexistente."; exit 1
+          fi
+          # tolera quebras de linha/espaços colados no secret
+          printf '%s' "$MOON_KEYSTORE_B64" | tr -d ' \r\n\t' | base64 -d > "$KS" 2>/dev/null || {
+            echo "::error::MOON_KEYSTORE_B64 não é base64 válido. Gere com: base64 -w0 moon-release.jks"; exit 1; }
           chmod 600 "$KS"
+          if ! keytool -list -keystore "$KS" -storepass "$MOON_KS_PASS" >/dev/null 2>&1; then
+            echo "::error::Keystore decodificada, mas a senha MOON_KS_PASS não abre (ou o arquivo não é uma keystore)."; exit 1
+          fi
           {
             echo "MOON_KEYSTORE=$KS"
             echo "MOON_KEY_ALIAS=$MOON_KEY_ALIAS"
